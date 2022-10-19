@@ -404,8 +404,24 @@ class FilterInfo {
  public:
   // Used to set the left bound.
   void setLeft(double left, bool isExclusive) {
-    left_ = left;
+    int_left_ = std::nullopt;
+    int_right_ = std::nullopt;
+
+    double_left_ = left;
     leftExclusive_ = isExclusive;
+    if (!isInitialized_) {
+      isInitialized_ = true;
+    }
+  }
+
+  // Used to set the left bound.
+  void setLeft(int64_t left, bool isExclusive) {
+    double_left_ = std::nullopt;
+    double_right_ = std::nullopt;
+
+    if (isExclusive)
+      left++;
+    int_left_ = left;
     if (!isInitialized_) {
       isInitialized_ = true;
     }
@@ -413,8 +429,24 @@ class FilterInfo {
 
   // Used to set the right bound.
   void setRight(double right, bool isExclusive) {
-    right_ = right;
+    int_left_ = std::nullopt;
+    int_right_ = std::nullopt;
+
+    double_right_ = right;
     rightExclusive_ = isExclusive;
+    if (!isInitialized_) {
+      isInitialized_ = true;
+    }
+  }
+
+  // Used to set the right bound.
+  void setRight(int64_t right, bool isExclusive) {
+    double_left_ = std::nullopt;
+    double_right_ = std::nullopt;
+
+    if (isExclusive)
+      right--;
+    int_right_ = right;
     if (!isInitialized_) {
       isInitialized_ = true;
     }
@@ -433,15 +465,63 @@ class FilterInfo {
     return isInitialized_ ? true : false;
   }
 
+  std::unique_ptr<common::Filter> makeFilter() {
+    if (!this->isInitialized())
+      VELOX_NYI(
+          "substrait conversion cannot make filter from an unintialized FilterInfo");
+    if (this->double_left_ || this->double_right_) {
+      return std::move(this->makeFilterDouble());
+    } else {
+      return std::move(this->makeFilterInt());
+    }
+  }
+
+  std::unique_ptr<common::DoubleRange> makeFilterDouble() {
+    double leftBound;
+    double rightBound;
+    bool leftUnbounded = true;
+    bool rightUnbounded = true;
+
+    if (this->double_left_) {
+      leftUnbounded = false;
+      leftBound = double_left_.value();
+    }
+    if (this->double_right_) {
+      rightUnbounded = false;
+      rightBound = double_right_.value();
+    }
+    return std::move(std::make_unique<common::DoubleRange>(
+        leftBound,
+        leftUnbounded,
+        leftExclusive_,
+        rightBound,
+        rightUnbounded,
+        rightExclusive_,
+        nullAllowed_));
+  }
+
+  std::unique_ptr<common::BigintRange> makeFilterInt() {
+    int64_t leftBound = std::numeric_limits<int64_t>::min();
+    int64_t rightBound = std::numeric_limits<int64_t>::max();
+    if (int_left_)
+      leftBound = int_left_.value();
+    if (int_right_)
+      rightBound = int_right_.value();
+    return std::move(std::make_unique<common::BigintRange>(
+        leftBound, rightBound, nullAllowed_));
+  }
+
   // The left bound.
-  std::optional<double> left_ = std::nullopt;
+  std::optional<double> double_left_ = std::nullopt;
+  std::optional<int64_t> int_left_ = std::nullopt;
   // The right bound.
-  std::optional<double> right_ = std::nullopt;
+  std::optional<double> double_right_ = std::nullopt;
+  std::optional<int64_t> int_right_ = std::nullopt;
   // The Null allowing.
   bool nullAllowed_ = true;
-  // If true, left bound will be exclusive.
+  // If true, left double bound will be exclusive.
   bool leftExclusive_ = false;
-  // If true, right bound will be exclusive.
+  // If true, right double bound will be exclusive.
   bool rightExclusive_ = false;
 
  private:
@@ -468,7 +548,8 @@ connector::hive::SubfieldFilters SubstraitVeloxPlanConverter::toVeloxFilter(
     auto filterName = getNameBeforeDelimiter(filterNameSpec, ":");
     int32_t colIdx;
     // TODO: Add different types' support here.
-    double val;
+    std::optional<double> double_value_ = std::nullopt;
+    std::optional<int64_t> int_value_ = std::nullopt;
     VELOX_CHECK_LE(
         scalarFunction.arguments_size(),
         2,
@@ -490,8 +571,29 @@ connector::hive::SubfieldFilters SubstraitVeloxPlanConverter::toVeloxFilter(
         }
         case ::substrait::Expression::RexTypeCase::kLiteral: {
           auto sLit = argExpr.literal();
-          // TODO: Only double is considered here.
-          val = sLit.fp64();
+          // TODO: Only double and int64_t is considered here.
+          switch (sLit.literal_type_case()) {
+            case ::substrait::Expression_Literal::LiteralTypeCase::kFp32:
+              double_value_ = sLit.fp32();
+              break;
+            case ::substrait::Expression_Literal::LiteralTypeCase::kFp64:
+              double_value_ = sLit.fp64();
+              break;
+            case ::substrait::Expression_Literal::LiteralTypeCase::kI16:
+              int_value_ = sLit.i16();
+              break;
+            case ::substrait::Expression_Literal::LiteralTypeCase::kI32:
+              int_value_ = sLit.i32();
+              break;
+            case ::substrait::Expression_Literal::LiteralTypeCase::kI64:
+              int_value_ = sLit.i64();
+              break;
+            default:
+              VELOX_NYI(
+                  "substrait conversion not support for literal type '{}'",
+                  sLit.literal_type_case());
+              break;
+          }
           break;
         }
         default:
@@ -499,29 +601,37 @@ connector::hive::SubfieldFilters SubstraitVeloxPlanConverter::toVeloxFilter(
               "Substrait conversion not supported for arg type '{}'", typeCase);
       }
     }
+
+    if (colIdxPos != 0) {
+      if (filterName == "gte")
+        filterName = "lte";
+      else if (filterName == "gt")
+        filterName = "lt";
+      else if (filterName == "lte")
+        filterName = "gte";
+      else if (filterName == "lt")
+        filterName = "gt";
+    }
+
     if (filterName == "is_not_null") {
       colInfoMap[colIdx]->forbidsNull();
-    } else if (filterName == "gte") {
-      if (colIdxPos == 0)
-        colInfoMap[colIdx]->setLeft(val, false);
-      else
-        colInfoMap[colIdx]->setRight(val, false);
-    } else if (filterName == "gt") {
-      if (colIdxPos == 0)
-        colInfoMap[colIdx]->setLeft(val, true);
-      else
-        colInfoMap[colIdx]->setRight(val, true);
-    } else if (filterName == "lte") {
-      if (colIdxPos == 0)
-        colInfoMap[colIdx]->setRight(val, false);
-      else
-        colInfoMap[colIdx]->setLeft(val, false);
-    } else if (filterName == "lt") {
-      if (colIdxPos == 0)
-        colInfoMap[colIdx]->setRight(val, true);
-      else
-        colInfoMap[colIdx]->setLeft(val, true);
-    } else {
+    } else if (filterName == "gte" && double_value_)
+      colInfoMap[colIdx]->setLeft(double_value_.value(), false);
+    else if (filterName == "gte")
+      colInfoMap[colIdx]->setLeft(int_value_.value(), false);
+    else if (filterName == "gt" && double_value_)
+      colInfoMap[colIdx]->setLeft(double_value_.value(), true);
+    else if (filterName == "gt")
+      colInfoMap[colIdx]->setLeft(int_value_.value(), true);
+    else if (filterName == "lte" && double_value_)
+      colInfoMap[colIdx]->setRight(double_value_.value(), false);
+    else if (filterName == "lte")
+      colInfoMap[colIdx]->setRight(int_value_.value(), false);
+    else if (filterName == "lt" && double_value_)
+      colInfoMap[colIdx]->setRight(double_value_.value(), true);
+    else if (filterName == "lt")
+      colInfoMap[colIdx]->setRight(int_value_.value(), true);
+    else {
       VELOX_NYI(
           "Substrait conversion not supported for filter name '{}'",
           filterName);
@@ -531,34 +641,39 @@ connector::hive::SubfieldFilters SubstraitVeloxPlanConverter::toVeloxFilter(
   // Construct the Filters.
   for (int idx = 0; idx < inputNameList.size(); idx++) {
     auto filterInfo = colInfoMap[idx];
-    double leftBound;
-    double rightBound;
-    bool leftUnbounded = true;
-    bool rightUnbounded = true;
-    bool leftExclusive = false;
-    bool rightExclusive = false;
     if (filterInfo->isInitialized()) {
-      if (filterInfo->left_) {
-        leftUnbounded = false;
-        leftBound = filterInfo->left_.value();
-        leftExclusive = filterInfo->leftExclusive_;
-      }
-      if (filterInfo->right_) {
-        rightUnbounded = false;
-        rightBound = filterInfo->right_.value();
-        rightExclusive = filterInfo->rightExclusive_;
-      }
-      bool nullAllowed = filterInfo->nullAllowed_;
       filters[common::Subfield(inputNameList[idx])] =
-          std::make_unique<common::DoubleRange>(
-              leftBound,
-              leftUnbounded,
-              leftExclusive,
-              rightBound,
-              rightUnbounded,
-              rightExclusive,
-              nullAllowed);
+          std::move(filterInfo->makeFilter());
     }
+
+    //   double leftBound;
+    //   double rightBound;
+    //   bool leftUnbounded = true;
+    //   bool rightUnbounded = true;
+    //   bool leftExclusive = false;
+    //   bool rightExclusive = false;
+    //   if (filterInfo->isInitialized()) {
+    //     if (filterInfo->left_) {
+    //       leftUnbounded = false;
+    //       leftBound = filterInfo->left_.value();
+    //       leftExclusive = filterInfo->leftExclusive_;
+    //     }
+    //     if (filterInfo->right_) {
+    //       rightUnbounded = false;
+    //       rightBound = filterInfo->right_.value();
+    //       rightExclusive = filterInfo->rightExclusive_;
+    //     }
+    //     bool nullAllowed = filterInfo->nullAllowed_;
+    //     filters[common::Subfield(inputNameList[idx])] =
+    //         std::make_unique<common::DoubleRange>(
+    //             leftBound,
+    //             leftUnbounded,
+    //             leftExclusive,
+    //             rightBound,
+    //             rightUnbounded,
+    //             rightExclusive,
+    //             nullAllowed);
+    // }
   }
   return filters;
 }
