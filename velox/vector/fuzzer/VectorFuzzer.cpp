@@ -239,17 +239,46 @@ void fuzzFlatPrimitiveImpl(
   }
 }
 
+// Servers as a wrapper around a vector that will be used to load a lazyVector.
+// Ensures that the loaded vector will only contain valid rows for the row set
+// that it was loaded for. NOTE: If the vector is a multi-level dictionary, the
+// indices from all the dictionaries are combined.
+class VectorLoaderWrap : public VectorLoader {
+ public:
+  explicit VectorLoaderWrap(VectorPtr vector) : vector_(vector) {}
+
+  void loadInternal(RowSet rowSet, ValueHook* hook, VectorPtr* result)
+      override {
+    VELOX_CHECK(!hook, "VectorLoaderWrap doesn't support ValueHook");
+    SelectivityVector rows(rowSet.back() + 1, false);
+    for (auto row : rowSet) {
+      rows.setValid(row, true);
+    }
+    rows.updateBounds();
+    *result = makeEncodingPreservedCopy(rows);
+  }
+
+ private:
+  // Returns a copy of 'vector_' while retaining dictionary encoding if present.
+  // Multiple dictionary layers are collapsed into one.
+  VectorPtr makeEncodingPreservedCopy(SelectivityVector& rows);
+  VectorPtr vector_;
+};
+
 } // namespace
 
 VectorPtr VectorFuzzer::fuzz(const TypePtr& type) {
-  return fuzz(type, opts_.vectorSize);
+  return fuzz(type, opts_.vectorSize, opts_.allowLazyVector);
 }
 
-VectorPtr VectorFuzzer::fuzz(const TypePtr& type, vector_size_t size) {
+VectorPtr
+VectorFuzzer::fuzz(const TypePtr& type, vector_size_t size, bool canBeLazy) {
   VectorPtr vector;
   vector_size_t vectorSize = size;
 
-  if (coinToss(0.1)) {
+  bool usingLazyVector = canBeLazy && coinToss(0.1);
+  // Lazy Vectors cannot be sliced, so we skip this if using lazy wrapping.
+  if (!usingLazyVector && coinToss(0.1)) {
     // Extend the underlying vector to allow slicing later.
     vectorSize += folly::Random::rand32(8, rng_);
   }
@@ -267,10 +296,14 @@ VectorPtr VectorFuzzer::fuzz(const TypePtr& type, vector_size_t size) {
     vector = vector->slice(offset, size);
   }
 
+  if (usingLazyVector) {
+    vector = wrapInLazyVector(vector);
+  }
+
   // Toss a coin and add dictionary indirections.
   while (coinToss(0.5)) {
     vectorSize = size;
-    if (vectorSize > 0 && coinToss(0.05)) {
+    if (!usingLazyVector && vectorSize > 0 && coinToss(0.05)) {
       vectorSize += folly::Random::rand32(8, rng_);
     }
     vector = fuzzDictionary(vector, vectorSize);
@@ -296,7 +329,11 @@ VectorPtr VectorFuzzer::fuzzConstant(const TypePtr& type, vector_size_t size) {
     if (coinToss(opts_.nullRatio)) {
       return BaseVector::createNullConstant(type, size, pool_);
     }
-    return BaseVector::createConstant(randVariant(type), size, pool_);
+    if (type->isUnKnown()) {
+      return BaseVector::createNullConstant(type, size, pool_);
+    } else {
+      return BaseVector::createConstant(randVariant(type), size, pool_);
+    }
   }
 
   // Otherwise, create constant by wrapping around another vector. This will
@@ -307,7 +344,7 @@ VectorPtr VectorFuzzer::fuzzConstant(const TypePtr& type, vector_size_t size) {
   auto innerVectorSize = folly::Random::rand32(1, opts_.vectorSize + 1, rng_);
   auto constantIndex = rand<vector_size_t>(rng_) % innerVectorSize;
   return BaseVector::wrapInConstant(
-      size, constantIndex, fuzz(type, innerVectorSize));
+      size, constantIndex, fuzz(type, innerVectorSize, false /*canBeLazy*/));
 }
 
 VectorPtr VectorFuzzer::fuzzFlat(const TypePtr& type) {
@@ -353,16 +390,21 @@ VectorPtr VectorFuzzer::fuzzFlatPrimitive(
   VELOX_CHECK(type->isPrimitiveType());
   auto vector = BaseVector::create(type, size, pool_);
 
-  // First, fill it with random values.
-  // TODO: We should bias towards edge cases (min, max, Nan, etc).
-  auto kind = vector->typeKind();
-  VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
-      fuzzFlatPrimitiveImpl, kind, vector, rng_, opts_);
+  if (type->isUnKnown()) {
+    auto* rawNulls = vector->mutableRawNulls();
+    bits::fillBits(rawNulls, 0, size, bits::kNull);
+  } else {
+    // First, fill it with random values.
+    // TODO: We should bias towards edge cases (min, max, Nan, etc).
+    auto kind = vector->typeKind();
+    VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
+        fuzzFlatPrimitiveImpl, kind, vector, rng_, opts_);
 
-  // Second, generate a random null vector.
-  for (size_t i = 0; i < vector->size(); ++i) {
-    if (coinToss(opts_.nullRatio)) {
-      vector->setNull(i, true);
+    // Second, generate a random null vector.
+    for (size_t i = 0; i < vector->size(); ++i) {
+      if (coinToss(opts_.nullRatio)) {
+        vector->setNull(i, true);
+      }
     }
   }
   return vector;
@@ -374,17 +416,27 @@ VectorPtr VectorFuzzer::fuzzComplex(const TypePtr& type, vector_size_t size) {
       return fuzzRow(
           std::dynamic_pointer_cast<const RowType>(type),
           size,
-          opts_.containerHasNulls);
+          opts_.containerHasNulls,
+          false /*canChildrenBeLazy*/);
 
     case TypeKind::ARRAY:
       return fuzzArray(
-          fuzz(type->asArray().elementType(), size * opts_.containerLength),
+          fuzz(
+              type->asArray().elementType(),
+              size * opts_.containerLength,
+              false /*canBeLazy*/),
           size);
 
     case TypeKind::MAP:
       return fuzzMap(
-          fuzz(type->asMap().keyType(), size * opts_.containerLength),
-          fuzz(type->asMap().valueType(), size * opts_.containerLength),
+          fuzz(
+              type->asMap().keyType(),
+              size * opts_.containerLength,
+              false /*canBeLazy*/),
+          fuzz(
+              type->asMap().valueType(),
+              size * opts_.containerLength,
+              false /*canBeLazy*/),
           size);
 
     default:
@@ -502,16 +554,21 @@ RowVectorPtr VectorFuzzer::fuzzRow(
 }
 
 RowVectorPtr VectorFuzzer::fuzzRow(const RowTypePtr& rowType) {
-  return fuzzRow(rowType, opts_.vectorSize, opts_.containerHasNulls);
+  return fuzzRow(
+      rowType,
+      opts_.vectorSize,
+      opts_.containerHasNulls,
+      false /*canChildrenBeLazy*/);
 }
 
 RowVectorPtr VectorFuzzer::fuzzRow(
     const RowTypePtr& rowType,
     vector_size_t size,
-    bool rowHasNulls) {
+    bool rowHasNulls,
+    bool canChildrenBeLazy) {
   std::vector<VectorPtr> children;
   for (auto i = 0; i < rowType->size(); ++i) {
-    children.push_back(fuzz(rowType->childAt(i), size));
+    children.push_back(fuzz(rowType->childAt(i), size, canChildrenBeLazy));
   }
 
   auto nulls = rowHasNulls ? fuzzNulls(size) : nullptr;
@@ -530,40 +587,9 @@ BufferPtr VectorFuzzer::fuzzNulls(vector_size_t size) {
 }
 
 variant VectorFuzzer::randVariant(const TypePtr& arg) {
-  if (arg->isArray()) {
-    auto arrayType = arg->asArray();
-    std::vector<variant> variantArray;
-    auto length = genContainerLength(opts_, rng_);
-    variantArray.reserve(length);
-
-    for (size_t i = 0; i < length; ++i) {
-      variantArray.emplace_back(randVariant(arrayType.elementType()));
-    }
-    return variant::array(std::move(variantArray));
-  } else if (arg->isMap()) {
-    auto mapType = arg->asMap();
-    std::map<variant, variant> variantMap;
-    auto length = genContainerLength(opts_, rng_);
-
-    for (size_t i = 0; i < length; ++i) {
-      variantMap.emplace(
-          randVariant(mapType.keyType()), randVariant(mapType.valueType()));
-    }
-    return variant::map(std::move(variantMap));
-  } else if (arg->isRow()) {
-    auto rowType = arg->asRow();
-    std::vector<variant> variantArray;
-    auto length = genContainerLength(opts_, rng_);
-    variantArray.reserve(length);
-
-    for (size_t i = 0; i < length; ++i) {
-      variantArray.emplace_back(randVariant(rowType.childAt(i)));
-    }
-    return variant::row(std::move(variantArray));
-  } else {
-    return VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
-        randVariantImpl, arg->kind(), rng_, opts_);
-  }
+  VELOX_CHECK(arg->isPrimitiveType());
+  return VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
+      randVariantImpl, arg->kind(), rng_, opts_);
 }
 
 TypePtr VectorFuzzer::randType(int maxDepth) {
@@ -605,6 +631,81 @@ RowTypePtr VectorFuzzer::randRowType(int maxDepth) {
     fields.push_back(randType(maxDepth));
   }
   return ROW(std::move(names), std::move(fields));
+}
+
+VectorPtr VectorFuzzer::wrapInLazyVector(VectorPtr baseVector) {
+  return std::make_shared<LazyVector>(
+      baseVector->pool(),
+      baseVector->type(),
+      baseVector->size(),
+      std::make_unique<VectorLoaderWrap>(baseVector));
+}
+
+RowVectorPtr VectorFuzzer::fuzzRowChildrenToLazy(RowVectorPtr rowVector) {
+  std::vector<VectorPtr> children;
+  VELOX_CHECK_NULL(rowVector->nulls());
+  for (auto child : rowVector->children()) {
+    VELOX_CHECK_NOT_NULL(child);
+    VELOX_CHECK(!child->isLazy());
+    // TODO: If child has dictionary wrappings, add ability to insert lazy wrap
+    // between those layers.
+    children.push_back(coinToss(0.5) ? wrapInLazyVector(child) : child);
+  }
+  return std::make_shared<RowVector>(
+      pool_,
+      rowVector->type(),
+      nullptr,
+      rowVector->size(),
+      std::move(children));
+}
+
+VectorPtr VectorLoaderWrap::makeEncodingPreservedCopy(SelectivityVector& rows) {
+  VectorPtr result;
+  DecodedVector decoded;
+  decoded.decode(*vector_, rows, false);
+
+  if (decoded.isConstantMapping() || decoded.isIdentityMapping()) {
+    BaseVector::ensureWritable(rows, vector_->type(), vector_->pool(), result);
+    result->copy(vector_.get(), rows, nullptr);
+    return result;
+  }
+
+  SelectivityVector baseRows;
+  auto baseVector = decoded.base();
+
+  baseRows.resize(baseVector->size(), false);
+  rows.applyToSelected([&](auto row) {
+    if (!decoded.isNullAt(row)) {
+      baseRows.setValid(decoded.index(row), true);
+    }
+  });
+  baseRows.updateBounds();
+
+  BaseVector::ensureWritable(
+      baseRows, baseVector->type(), vector_->pool(), result);
+  result->copy(baseVector, baseRows, nullptr);
+
+  BufferPtr indices = allocateIndices(rows.end(), vector_->pool());
+  auto rawIndices = indices->asMutable<vector_size_t>();
+  auto decodedIndices = decoded.indices();
+  rows.applyToSelected(
+      [&](auto row) { rawIndices[row] = decodedIndices[row]; });
+
+  BufferPtr nulls = nullptr;
+  if (decoded.nulls()) {
+    if (!baseRows.hasSelections()) {
+      nulls = allocateNulls(rows.end(), vector_->pool(), bits::kNull);
+    } else {
+      nulls = AlignedBuffer::allocate<bool>(rows.end(), vector_->pool());
+      std::memcpy(
+          nulls->asMutable<uint64_t>(),
+          decoded.nulls(),
+          bits::nbytes(rows.end()));
+    }
+  }
+
+  return BaseVector::wrapInDictionary(
+      std::move(nulls), std::move(indices), rows.end(), result);
 }
 
 } // namespace facebook::velox
