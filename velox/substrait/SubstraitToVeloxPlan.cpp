@@ -469,7 +469,14 @@ connector::hive::SubfieldFilters SubstraitVeloxPlanConverter::toVeloxFilter(
     int32_t colIdx;
     // TODO: Add different types' support here.
     double val;
-    for (auto& arg : scalarFunction.arguments()) {
+    VELOX_CHECK_LE(
+        scalarFunction.arguments_size(),
+        2,
+        "Substrait Read filter cannot take more than two arguments");
+    int colIdxPos = -1;
+    // for (auto& arg : scalarFunction.arguments()) {
+    for (int i = 0; i < scalarFunction.arguments_size(); i++) {
+      auto& arg = scalarFunction.arguments(i);
       auto argExpr = arg.value();
       auto typeCase = argExpr.rex_type_case();
       switch (typeCase) {
@@ -478,6 +485,7 @@ connector::hive::SubfieldFilters SubstraitVeloxPlanConverter::toVeloxFilter(
           // TODO: Only direct reference is considered here.
           auto dRef = sel.direct_reference();
           colIdx = substraitParser_->parseReferenceSegment(dRef);
+          colIdxPos = i;
           break;
         }
         case ::substrait::Expression::RexTypeCase::kLiteral: {
@@ -494,13 +502,25 @@ connector::hive::SubfieldFilters SubstraitVeloxPlanConverter::toVeloxFilter(
     if (filterName == "is_not_null") {
       colInfoMap[colIdx]->forbidsNull();
     } else if (filterName == "gte") {
-      colInfoMap[colIdx]->setLeft(val, false);
+      if (colIdxPos == 0)
+        colInfoMap[colIdx]->setLeft(val, false);
+      else
+        colInfoMap[colIdx]->setRight(val, false);
     } else if (filterName == "gt") {
-      colInfoMap[colIdx]->setLeft(val, true);
+      if (colIdxPos == 0)
+        colInfoMap[colIdx]->setLeft(val, true);
+      else
+        colInfoMap[colIdx]->setRight(val, true);
     } else if (filterName == "lte") {
-      colInfoMap[colIdx]->setRight(val, false);
+      if (colIdxPos == 0)
+        colInfoMap[colIdx]->setRight(val, false);
+      else
+        colInfoMap[colIdx]->setLeft(val, false);
     } else if (filterName == "lt") {
-      colInfoMap[colIdx]->setRight(val, true);
+      if (colIdxPos == 0)
+        colInfoMap[colIdx]->setRight(val, true);
+      else
+        colInfoMap[colIdx]->setLeft(val, true);
     } else {
       VELOX_NYI(
           "Substrait conversion not supported for filter name '{}'",
