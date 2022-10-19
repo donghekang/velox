@@ -379,3 +379,4 @@ install(FILES velox/type/Type.h DESTINATION "include/velox")
 
 add_subdirectory(third_party)
 add_subdirectory(velox)
+add_subdirectory(substrait_consumer)
