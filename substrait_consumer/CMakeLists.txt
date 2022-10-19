@@ -13,7 +13,10 @@ target_link_libraries(
 
 add_executable(consumer
     consumer.cpp)
-add_dependencies(consumer velox_substrait_plan_converter)
+add_dependencies(consumer 
+    velox_substrait_plan_converter
+    velox_functions_prestosql
+)
 
 target_link_libraries(
     consumer
@@ -22,4 +25,5 @@ target_link_libraries(
     velox_hive_connector
     velox_memory
     velox_dwio_parquet_reader
+    velox_functions_prestosql
 )

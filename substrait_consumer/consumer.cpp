@@ -12,6 +12,7 @@
 #include "velox/dwio/dwrf/reader/DwrfReader.h"
 #include "velox/dwio/parquet/RegisterParquetReader.h"
 #include "velox/exec/Task.h"
+#include "velox/functions/prestosql/registration/RegistrationFunctions.h"
 #include "velox/substrait/SubstraitToVeloxPlan.h"
 #include "velox/substrait/proto/substrait/plan.pb.h"
 
@@ -76,6 +77,7 @@ int main(int argc, char** argv) {
   folly::init(&argc, &argv);
   auto pool = memory::getDefaultScopedMemoryPool();
   registerConnector();
+  functions::prestosql::registerAllScalarFunctions();
 
   ::substrait::Plan substriat_plan;
   readSubstraitPlan(argv[1], substriat_plan);

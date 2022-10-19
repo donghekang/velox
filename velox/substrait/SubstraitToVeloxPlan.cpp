@@ -631,7 +631,13 @@ connector::hive::SubfieldFilters SubstraitVeloxPlanConverter::toVeloxFilter(
       colInfoMap[colIdx]->setRight(double_value_.value(), true);
     else if (filterName == "lt")
       colInfoMap[colIdx]->setRight(int_value_.value(), true);
-    else {
+    else if (filterName == "equal" && double_value_) {
+      colInfoMap[colIdx]->setLeft(double_value_.value(), false);
+      colInfoMap[colIdx]->setRight(double_value_.value(), false);
+    } else if (filterName == "equal") {
+      colInfoMap[colIdx]->setLeft(int_value_.value(), false);
+      colInfoMap[colIdx]->setRight(int_value_.value(), false);
+    } else {
       VELOX_NYI(
           "Substrait conversion not supported for filter name '{}'",
           filterName);
