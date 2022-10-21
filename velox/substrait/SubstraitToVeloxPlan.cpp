@@ -15,6 +15,7 @@
  */
 
 #include "velox/substrait/SubstraitToVeloxPlan.h"
+#include "velox/exec/RoundRobinPartitionFunction.h"
 #include "velox/substrait/TypeUtils.h"
 #include "velox/substrait/VariantToVectorConverter.h"
 #include "velox/type/Type.h"
@@ -128,6 +129,47 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
       aggregateMasks,
       ignoreNullKeys,
       childNode);
+}
+
+core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
+    const ::substrait::SetRel& setRel) {
+  if (setRel.op() != ::substrait::SetRel_SetOp::SetRel_SetOp_SET_OP_UNION_ALL) {
+    VELOX_UNSUPPORTED(
+        "Substrait converter does not support {} SetRel", setRel.op());
+  }
+  std::vector<core::PlanNodePtr> children;
+  int nodeId = 0;
+
+  for (int i = 0; i < setRel.inputs_size(); i++) {
+    auto child = toVeloxPlan(setRel.inputs(i));
+    const auto& inputType = child->outputType();
+
+    // convert the column names using ProjectNode
+    std::vector<std::string> projectNames;
+    std::vector<core::TypedExprPtr> expressions;
+    for (int colIdx = 0; colIdx < inputType->size(); colIdx++) {
+      ::substrait::Expression exp;
+      auto field = exp.mutable_selection();
+      field->mutable_direct_reference()->mutable_struct_field()->set_field(
+          colIdx);
+      field->mutable_root_reference();
+      expressions.emplace_back(exprConverter_->toVeloxExpr(exp, inputType));
+      projectNames.emplace_back(substraitParser_->makeNodeName(nodeId, colIdx));
+    }
+    children.emplace_back(std::make_shared<core::ProjectNode>(
+        nextPlanNodeId(),
+        std::move(projectNames),
+        std::move(expressions),
+        child));
+  }
+  return std::make_shared<core::LocalPartitionNode>(
+      nextPlanNodeId(),
+      core::LocalPartitionNode::Type::kRepartition,
+      [&](int numPartitions) -> std::unique_ptr<core::PartitionFunction> {
+        return std::make_unique<exec::RoundRobinPartitionFunction>(
+            numPartitions);
+      },
+      children);
 }
 
 core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
@@ -352,6 +394,9 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
     auto planNode = toVeloxPlan(rel.read(), splitInfo);
     splitInfoMap_[planNode->id()] = splitInfo;
     return planNode;
+  }
+  if (rel.has_set()) {
+    return toVeloxPlan(rel.set());
   }
   VELOX_NYI("Substrait conversion not supported for Rel.");
 }

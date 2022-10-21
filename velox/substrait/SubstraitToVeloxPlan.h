@@ -44,6 +44,9 @@ class SubstraitVeloxPlanConverter {
     dwio::common::FileFormat format;
   };
 
+  /// Convert Substrait SetRel into Velox PlanNode
+  core::PlanNodePtr toVeloxPlan(const ::substrait::SetRel& setRel);
+
   /// Convert Substrait AggregateRel into Velox PlanNode.
   core::PlanNodePtr toVeloxPlan(const ::substrait::AggregateRel& aggRel);
 

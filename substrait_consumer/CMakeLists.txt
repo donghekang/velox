@@ -12,7 +12,9 @@ target_link_libraries(
 )
 
 add_executable(consumer
-    consumer.cpp)
+    consumer.cpp
+    scalar_functions/bitmap_scalar.cpp
+)
 add_dependencies(consumer 
     velox_substrait_plan_converter
     velox_functions_prestosql
@@ -26,4 +28,5 @@ target_link_libraries(
     velox_memory
     velox_dwio_parquet_reader
     velox_functions_prestosql
+    velox_exec_test_lib
 )
