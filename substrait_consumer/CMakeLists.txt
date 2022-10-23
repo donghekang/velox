@@ -14,6 +14,8 @@ target_link_libraries(
 add_executable(consumer
     consumer.cpp
     scalar_functions/bitmap_scalar.cpp
+    aggregation_functions/bitmap_or.cpp
+    aggregation_functions/reconstruct.cpp
 )
 add_dependencies(consumer 
     velox_substrait_plan_converter

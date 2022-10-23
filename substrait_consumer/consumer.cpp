@@ -4,6 +4,7 @@
 #include <sstream>
 #include "stdio.h"
 #include "stdlib.h"
+#include "substrait_consumer/aggregation_functions/registerAggregate.h"
 #include "substrait_consumer/scalar_functions/bitmap_scalar.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/common/memory/Memory.h"
@@ -44,6 +45,8 @@ void registerFunctions() {
   functions::prestosql::registerAllScalarFunctions();
   aggregate::prestosql::registerAllAggregateFunctions();
   registerMyBitmapGetFunction();
+  registerBitmapORAggregates();
+  registerReconstructAggregates();
 }
 
 void registerConnector() {

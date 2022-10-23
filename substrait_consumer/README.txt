@@ -8,3 +8,6 @@
 2. ProjectRel:
     2.1 it first removes all fields and then produces new fields
     2.2 not support binary, should use string/varchar
+
+3. AggregateRel:
+    3.1 The first columns in the result are the groupby keys

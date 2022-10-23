@@ -1,0 +1,2 @@
+void registerBitmapORAggregates();
+void registerReconstructAggregates();
