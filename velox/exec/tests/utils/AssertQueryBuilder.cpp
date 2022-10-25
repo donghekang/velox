@@ -15,6 +15,7 @@
  */
 
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
+#include "velox/exec/PlanNodeStats.h"
 
 namespace facebook::velox::exec::test {
 
@@ -155,8 +156,12 @@ std::shared_ptr<Task> AssertQueryBuilder::assertResults(
   return cursor->task();
 }
 
-RowVectorPtr AssertQueryBuilder::copyResults(memory::MemoryPool* pool) {
+RowVectorPtr AssertQueryBuilder::copyResults(
+    memory::MemoryPool* pool,
+    bool printStats) {
   auto [cursor, results] = readCursor();
+
+  VELOX_CHECK(waitForTaskCompletion(cursor->task().get(), 3'600'000'000UL));
 
   VELOX_CHECK(!results.empty());
 
@@ -173,6 +178,11 @@ RowVectorPtr AssertQueryBuilder::copyResults(memory::MemoryPool* pool) {
     copyCount += result->size();
   }
 
+  if (printStats) {
+    const auto stats = cursor->task()->taskStats();
+    std::string str_stats = printPlanWithStats(*params_.planNode, stats, false);
+    printf("%s\n", str_stats.c_str());
+  }
   return copy;
 }
 

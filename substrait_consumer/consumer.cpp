@@ -1,5 +1,6 @@
 #include <folly/init/Init.h>
 #include <google/protobuf/util/json_util.h>
+#include <sys/time.h>
 #include <fstream>
 #include <sstream>
 #include "stdio.h"
@@ -13,6 +14,7 @@
 #include "velox/core/PlanFragment.h"
 #include "velox/dwio/dwrf/reader/DwrfReader.h"
 #include "velox/dwio/parquet/RegisterParquetReader.h"
+#include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/Task.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
@@ -22,6 +24,8 @@
 
 namespace velox = facebook::velox;
 using namespace facebook::velox;
+
+//#define VERBOSE
 
 const std::string kHiveConnectorId = "test-hive";
 
@@ -108,34 +112,36 @@ int main(int argc, char** argv) {
   registerConnector();
   registerFunctions();
 
+  timeval start, end;
+  gettimeofday(&start, NULL);
+
   ::substrait::Plan substriat_plan;
   readSubstraitPlan(argv[1], substriat_plan);
   velox::substrait::SubstraitVeloxPlanConverter plan_converter(pool.get());
   auto plan_node = plan_converter.toVeloxPlan(substriat_plan);
 
-  // core::PlanFragment plan_fragment = core::PlanFragment{plan_node};
-  // auto task = std::make_shared<exec::Task>(
-  //     "mytask", plan_fragment, 0, core::QueryCtx::createForTest());
-  // addSplits(plan_converter.splitInfos(), task);
+  exec::test::AssertQueryBuilder query_builder(plan_node);
+  addSplits(plan_converter.splitInfos(), query_builder);
 
-  // while (auto result = task->next()) {
-  //   printf("Query result:\n");
-  //   for (vector_size_t i = 0; i < result->size(); i++) {
-  //     printf("\t%s\n", result->toString(i).c_str());
-  //   }
-  // }
+  if (argc == 3)
+    query_builder.maxDrivers(atoi(argv[2]));
 
-  {
-    exec::test::AssertQueryBuilder query_builder(plan_node);
-    addSplits(plan_converter.splitInfos(), query_builder);
-    printf("%s\n", plan_node->toString(true, true).c_str());
+  int printStats = false;
+#ifdef VERBOSE
+  printStats = true;
+#endif
 
-    RowVectorPtr result = query_builder.copyResults(pool.get());
-    printf("Query result: %d rows\n", result->size());
-    for (vector_size_t i = 0; i < result->size(); i++) {
-      printf("\t%s\n", result->toString(i).c_str());
-    }
+  RowVectorPtr result = query_builder.copyResults(pool.get(), printStats);
+  printf("Query result: %d rows\n", result->size());
+  for (vector_size_t i = 0; i < result->size(); i++) {
+    printf("\t%s\n", result->toString(i).c_str());
   }
+
+  gettimeofday(&end, NULL);
+  double time_value =
+      ((end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec)) /
+      1000000.0;
+  printf("Total time: %f seconds\n", time_value);
 
   return 0;
 }

@@ -162,14 +162,15 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
         std::move(expressions),
         child));
   }
-  return std::make_shared<core::LocalPartitionNode>(
-      nextPlanNodeId(),
-      core::LocalPartitionNode::Type::kRepartition,
-      [&](int numPartitions) -> std::unique_ptr<core::PartitionFunction> {
-        return std::make_unique<exec::RoundRobinPartitionFunction>(
-            numPartitions);
-      },
-      children);
+  return core::LocalPartitionNode::gather(nextPlanNodeId(), children);
+  // return std::make_shared<core::LocalPartitionNode>(
+  //     nextPlanNodeId(),
+  //     core::LocalPartitionNode::Type::kRepartition,
+  //     [&](int numPartitions) -> std::unique_ptr<core::PartitionFunction> {
+  //       return std::make_unique<exec::RoundRobinPartitionFunction>(
+  //           numPartitions);
+  //     },
+  //     children);
 }
 
 core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
