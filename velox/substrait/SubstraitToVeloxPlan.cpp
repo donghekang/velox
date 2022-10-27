@@ -15,7 +15,7 @@
  */
 
 #include "velox/substrait/SubstraitToVeloxPlan.h"
-#include "velox/exec/RoundRobinPartitionFunction.h"
+#include "velox/exec/HashPartitionFunction.h"
 #include "velox/substrait/TypeUtils.h"
 #include "velox/substrait/VariantToVectorConverter.h"
 #include "velox/type/Type.h"
@@ -171,6 +171,37 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
   //           numPartitions);
   //     },
   //     children);
+}
+
+core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
+    const ::substrait::ExchangeRel& exchangeRel) {
+  if (exchangeRel.exchange_kind_case() !=
+      ::substrait::ExchangeRel::kScatterByFields)
+    VELOX_UNSUPPORTED(
+        "Substrait convert does not support {} ExchangeRel",
+        exchangeRel.exchange_kind_case());
+  core::PlanNodePtr childNode;
+  if (exchangeRel.has_input())
+    childNode = toVeloxPlan(exchangeRel.input());
+  else
+    VELOX_FAIL("Child Rel is expected in ExchangeRel.");
+
+  const auto& inputType = childNode->outputType();
+  std::vector<column_index_t> keyChannels;
+  for (const auto& field : exchangeRel.scatter_by_fields().fields()) {
+    const auto expr = exprConverter_->toVeloxExpr(field, inputType);
+    keyChannels.push_back(inputType->getChildIdx(expr->name()));
+  }
+
+  return std::make_shared<core::LocalPartitionNode>(
+      nextPlanNodeId(),
+      core::LocalPartitionNode::Type::kRepartition,
+      [inputType, keyChannels](
+          int numPartitions) -> std::unique_ptr<core::PartitionFunction> {
+        return std::make_unique<exec::HashPartitionFunction>(
+            numPartitions, inputType, keyChannels);
+      },
+      std::vector<core::PlanNodePtr>{childNode});
 }
 
 core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
@@ -398,6 +429,9 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
   }
   if (rel.has_set()) {
     return toVeloxPlan(rel.set());
+  }
+  if (rel.has_exchange()) {
+    return toVeloxPlan(rel.exchange());
   }
   VELOX_NYI("Substrait conversion not supported for Rel.");
 }

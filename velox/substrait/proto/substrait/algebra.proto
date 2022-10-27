@@ -362,6 +362,7 @@ message Rel {
     ExtensionMultiRel extension_multi = 10;
     ExtensionLeafRel extension_leaf = 11;
     CrossRel cross = 12;
+    ExchangeRel exchange = 13;
   }
 }
 

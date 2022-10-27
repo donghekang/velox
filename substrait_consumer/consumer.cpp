@@ -123,8 +123,11 @@ int main(int argc, char** argv) {
   exec::test::AssertQueryBuilder query_builder(plan_node);
   addSplits(plan_converter.splitInfos(), query_builder);
 
+  int driver_per_pipeline = 12;
   if (argc == 3)
-    query_builder.maxDrivers(atoi(argv[2]));
+    driver_per_pipeline = atoi(argv[2]);
+  query_builder.maxDrivers(driver_per_pipeline);
+  printf("Thread per pipeline: %d\n", driver_per_pipeline);
 
   int printStats = false;
 #ifdef VERBOSE

@@ -11,3 +11,7 @@
 
 3. AggregateRel:
     3.1 The first columns in the result are the groupby keys
+
+4. ExchangeRel:
+    4.1 The partition_count in the rel is ignored. The number of partitions is
+        determined at runtime based on the parallelism of the upperstream pipeline
