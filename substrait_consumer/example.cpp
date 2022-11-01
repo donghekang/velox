@@ -15,6 +15,7 @@
 #include "velox/dwio/dwrf/reader/DwrfReader.h"
 #include "velox/exec/Task.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
+#include "velox/functions/prestosql/window/WindowFunctionsRegistration.h"
 #include "velox/substrait/proto/substrait/plan.pb.h"
 #include "velox/type/Type.h"
 #include "velox/vector/BaseVector.h"
@@ -65,55 +66,66 @@ int main(int argc, char** argv) {
     std::cout << rowVector->toString(i) << std::endl;
   }
 
-  std::string file_path(argv[1]);
-  const std::string kHiveConnectorId = "test-hive";
-  auto hiveConnector =
-      connector::getConnectorFactory(
-          connector::hive::HiveConnectorFactory::kHiveConnectorName)
-          ->newConnector(kHiveConnectorId, nullptr);
-  connector::registerConnector(hiveConnector);
-  filesystems::registerLocalFileSystem();
-  dwrf::registerDwrfReaderFactory();
+  ::window::registerWindowFunctions();
 
-  auto writePlanFragment =
+  auto windowPlanFragment =
       exec::test::PlanBuilder()
           .values({rowVector})
-          .tableWrite(
-              inputRowType->names(),
-              std::make_shared<core::InsertTableHandle>(
-                  kHiveConnectorId,
-                  std::make_shared<connector::hive::HiveInsertTableHandle>(
-                      file_path)))
+          .window(
+              {"nth_value(my_col, 1) over (range between 2 preceding and 2 following) as a"})
           .planFragment();
-  auto writeTask = std::make_shared<exec::Task>(
-      "my_write_task", writePlanFragment, 0, core::QueryCtx::createForTest());
-  while (auto result = writeTask->next())
-    ;
-
-  core::PlanNodeId scanNodeId;
-  auto readPlanFragment = exec::test::PlanBuilder()
-                              .tableScan(inputRowType)
-                              .capturePlanNodeId(scanNodeId)
-                              .orderBy({"my_col"}, false)
-                              .planFragment();
-  auto readTask = std::make_shared<exec::Task>(
-      "my_read_task", readPlanFragment, 0, core::QueryCtx::createForTest());
-  auto connectorSplit = std::make_shared<connector::hive::HiveConnectorSplit>(
-      kHiveConnectorId, "file://" + file_path, dwio::common::FileFormat::DWRF);
-  readTask->addSplit(scanNodeId, exec::Split{connectorSplit});
-  readTask->noMoreSplits(scanNodeId);
-
-  while (auto result = readTask->next()) {
-    printf("Vector available after processing (scan + sort):\n");
+  auto windowTask = std::make_shared<exec::Task>(
+      "my_window_task", windowPlanFragment, 0, core::QueryCtx::createForTest());
+  while (auto result = windowTask->next()) {
     for (vector_size_t i = 0; i < result->size(); i++)
       printf("%s\n", result->toString(i).c_str());
   }
-  //   if (argc < 2) {
-  //     printf("Please specify a Substrait plan\n");
-  //     return EXIT_FAILURE;
-  //   }
 
-  //   ::substrait::Plan plan;
-  //   readSubstraitPlan(argv[1], plan);
+  // std::string file_path(argv[1]);
+  // const std::string kHiveConnectorId = "test-hive";
+  // auto hiveConnector =
+  //     connector::getConnectorFactory(
+  //         connector::hive::HiveConnectorFactory::kHiveConnectorName)
+  //         ->newConnector(kHiveConnectorId, nullptr);
+  // connector::registerConnector(hiveConnector);
+  // filesystems::registerLocalFileSystem();
+  // dwrf::registerDwrfReaderFactory();
+
+  // auto writePlanFragment =
+  //     exec::test::PlanBuilder()
+  //         .values({rowVector})
+  //         .tableWrite(
+  //             inputRowType->names(),
+  //             std::make_shared<core::InsertTableHandle>(
+  //                 kHiveConnectorId,
+  //                 std::make_shared<connector::hive::HiveInsertTableHandle>(
+  //                     file_path)))
+  //         .planFragment();
+  // auto writeTask = std::make_shared<exec::Task>(
+  //     "my_write_task", writePlanFragment, 0,
+  //     core::QueryCtx::createForTest());
+  // while (auto result = writeTask->next())
+  //   ;
+
+  // core::PlanNodeId scanNodeId;
+  // auto readPlanFragment = exec::test::PlanBuilder()
+  //                             .tableScan(inputRowType)
+  //                             .capturePlanNodeId(scanNodeId)
+  //                             .orderBy({"my_col"}, false)
+  //                             .planFragment();
+  // auto readTask = std::make_shared<exec::Task>(
+  //     "my_read_task", readPlanFragment, 0, core::QueryCtx::createForTest());
+  // auto connectorSplit =
+  // std::make_shared<connector::hive::HiveConnectorSplit>(
+  //     kHiveConnectorId, "file://" + file_path,
+  //     dwio::common::FileFormat::DWRF);
+  // readTask->addSplit(scanNodeId, exec::Split{connectorSplit});
+  // readTask->noMoreSplits(scanNodeId);
+
+  // while (auto result = readTask->next()) {
+  //   printf("Vector available after processing (scan + sort):\n");
+  //   for (vector_size_t i = 0; i < result->size(); i++)
+  //     printf("%s\n", result->toString(i).c_str());
+  // }
   return 0;
 }

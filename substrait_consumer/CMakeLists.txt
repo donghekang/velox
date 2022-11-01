@@ -9,6 +9,7 @@ target_link_libraries(
     velox_exec_test_lib
     velox_hive_connector
     velox_memory
+    velox_window
 )
 
 add_executable(consumer
