@@ -35,11 +35,28 @@
 namespace facebook::velox::exec {
 
 namespace {
+
 folly::Synchronized<std::vector<std::shared_ptr<TaskListener>>>& listeners() {
   static folly::Synchronized<std::vector<std::shared_ptr<TaskListener>>>
       kListeners;
   return kListeners;
 }
+
+std::string errorMessageImpl(const std::exception_ptr& exception) {
+  if (!exception) {
+    return "";
+  }
+  std::string message;
+  try {
+    std::rethrow_exception(exception);
+  } catch (const std::exception& e) {
+    message = e.what();
+  } catch (...) {
+    message = "<Unknown exception type>";
+  }
+  return message;
+}
+
 } // namespace
 
 std::atomic<uint64_t> Task::numCreatedTasks_ = 0;
@@ -1086,7 +1103,9 @@ bool Task::allPeersFinished(
     std::vector<std::shared_ptr<Driver>>& peers) {
   std::lock_guard<std::mutex> l(mutex_);
   if (exception_) {
-    VELOX_FAIL("Task is terminating because of error: {}", errorMessage());
+    VELOX_FAIL(
+        "Task is terminating because of error: {}",
+        errorMessageImpl(exception_));
   }
   const auto splitGroupId = caller->driverCtx()->splitGroupId;
   auto& barriers = splitGroupStates_[splitGroupId].barriers;
@@ -1428,8 +1447,7 @@ void Task::onTaskCompletion() {
     }
 
     for (auto& listener : listeners) {
-      listener->onTaskCompletion(
-          uuid_, taskId_, state, exception, std::move(stats));
+      listener->onTaskCompletion(uuid_, taskId_, state, exception, stats);
     }
   });
 }
@@ -1611,16 +1629,7 @@ void Task::setError(const std::string& message) {
 
 std::string Task::errorMessage() const {
   std::lock_guard<std::mutex> l(mutex_);
-  if (!exception_) {
-    return "";
-  }
-  std::string message;
-  try {
-    std::rethrow_exception(exception_);
-  } catch (const std::exception& e) {
-    message = e.what();
-  }
-  return message;
+  return errorMessageImpl(exception_);
 }
 
 StopReason Task::enter(ThreadState& state) {

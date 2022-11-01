@@ -658,6 +658,14 @@ class VectorTest : public testing::Test, public test::VectorTestBase {
           std::make_unique<TestingLoader>(slice));
       testSlices(wrapped, level - 1);
     }
+    {
+      // Test that resize works even when the underlying buffers are
+      // immutable. This is true for a slice since it creates buffer views over
+      // the buffers of the original vector that it sliced.
+      auto newSize = slice->size() * 2;
+      slice->resize(newSize);
+      EXPECT_EQ(slice->size(), newSize);
+    }
   }
 
   static void testSlices(const VectorPtr& slice, int level = 2) {
@@ -1049,6 +1057,7 @@ TEST_F(VectorTest, map) {
 }
 
 TEST_F(VectorTest, unknown) {
+  // Creates a const UNKNOWN vector.
   auto constUnknownVector =
       BaseVector::createConstant(variant(TypeKind::UNKNOWN), 123, pool_.get());
   ASSERT_FALSE(constUnknownVector->isScalar());
@@ -1058,6 +1067,7 @@ TEST_F(VectorTest, unknown) {
     ASSERT_TRUE(constUnknownVector->isNullAt(i));
   }
 
+  // Create an int vector and copy UNKNOWN const vector into it.
   auto intVector = BaseVector::create(BIGINT(), 10, pool_.get());
   ASSERT_FALSE(intVector->isNullAt(0));
   ASSERT_FALSE(intVector->mayHaveNulls());
@@ -1087,6 +1097,17 @@ TEST_F(VectorTest, unknown) {
   }
   // Can't copy to UNKNOWN vector.
   EXPECT_ANY_THROW(unknownVector->copy(intVector.get(), rows, nullptr));
+
+  // Copying flat UNKNOWN into integer vector nulls out all the copied element.
+  ASSERT_FALSE(intVector->isNullAt(3));
+  intVector->copy(unknownVector.get(), 3, 3, 1);
+  ASSERT_TRUE(intVector->isNullAt(3));
+
+  rows.resize(intVector->size());
+  intVector->copy(unknownVector.get(), rows, nullptr);
+  for (int i = 0; i < intVector->size(); ++i) {
+    ASSERT_TRUE(intVector->isNullAt(i));
+  }
 
   // It is okay to copy to a non-constant UNKNOWN vector.
   unknownVector->copy(constUnknownVector.get(), rows, nullptr);
@@ -1970,6 +1991,31 @@ TEST_F(VectorTest, acquireSharedStringBuffers) {
   EXPECT_EQ(2, flatVector->stringBuffers().size());
   flatVector->acquireSharedStringBuffers(sourceVectors[0].get());
   EXPECT_EQ(2, flatVector->stringBuffers().size());
+}
+
+/// Test MapVector::canonicalize for a MapVector with 'values' vector shorter
+/// than 'keys' vector.
+TEST_F(VectorTest, mapCanonicalizeValuesShorterThenKeys) {
+  auto mapVector = std::make_shared<MapVector>(
+      pool(),
+      MAP(BIGINT(), BIGINT()),
+      nullptr,
+      2,
+      makeIndices({0, 2}),
+      makeIndices({2, 2}),
+      makeFlatVector<int64_t>({7, 6, 5, 4, 3, 2, 1}),
+      makeFlatVector<int64_t>({6, 5, 4, 3, 2, 1}));
+  EXPECT_FALSE(mapVector->hasSortedKeys());
+
+  MapVector::canonicalize(mapVector);
+  EXPECT_TRUE(mapVector->hasSortedKeys());
+
+  // Verify that keys and values referenced from the map are sorted. Keys and
+  // values not referenced from the map are not sorted.
+  test::assertEqualVectors(
+      makeFlatVector<int64_t>({6, 7, 4, 5, 3, 2}), mapVector->mapKeys());
+  test::assertEqualVectors(
+      makeFlatVector<int64_t>({5, 6, 3, 4, 2, 1}), mapVector->mapValues());
 }
 
 TEST_F(VectorTest, mapCanonicalize) {

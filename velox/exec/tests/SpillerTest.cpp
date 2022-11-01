@@ -322,6 +322,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
 
   void
   setupSpiller(int64_t targetFileSize, bool makeError, bool ascending = true) {
+    stats_.clear();
     if (type_ == Spiller::Type::kHashJoinProbe) {
       // kHashJoinProbe doesn't have associated row container.
       spiller_ = std::make_unique<Spiller>(
@@ -331,6 +332,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
           makeError ? "/bad/path" : tempDirPath_->path,
           targetFileSize,
           *pool_,
+          stats_,
           executor());
     } else if (type_ == Spiller::Type::kOrderBy) {
       // We spill 'data' in one partition in type of kOrderBy, otherwise in 4
@@ -345,6 +347,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
           makeError ? "/bad/path" : tempDirPath_->path,
           targetFileSize,
           *pool_,
+          stats_,
           executor());
     } else {
       spiller_ = std::make_unique<Spiller>(
@@ -358,6 +361,7 @@ class SpillerTest : public exec::test::RowContainerTestBase {
           makeError ? "/bad/path" : tempDirPath_->path,
           targetFileSize,
           *pool_,
+          stats_,
           executor());
     }
     if (type_ == Spiller::Type::kOrderBy) {
@@ -701,15 +705,16 @@ class SpillerTest : public exec::test::RowContainerTestBase {
 
   const TestParam param_;
   const Spiller::Type type_;
-  const int executorPoolSize_;
+  const int32_t executorPoolSize_;
   const HashBitRange hashBits_;
-  const int numPartitions_;
+  const int32_t numPartitions_;
+  std::unordered_map<std::string, RuntimeMetric> stats_;
   folly::Random::DefaultGenerator rng_;
   std::unique_ptr<folly::IOThreadPoolExecutor> executor_;
   std::shared_ptr<TempDirectoryPath> tempDirPath_;
   std::shared_ptr<FileSystem> fs_;
   RowTypePtr rowType_;
-  int numKeys_;
+  int32_t numKeys_;
   std::vector<column_index_t> keyChannels_;
   std::vector<uint32_t> spillPartitions_;
   std::vector<BufferPtr> spillIndicesBuffers_;
@@ -1008,4 +1013,95 @@ TEST(SpillerTest, stats) {
   EXPECT_EQ(3 * stats.spilledRows, sumStats.spilledRows);
   EXPECT_EQ(3 * stats.spilledBytes, sumStats.spilledBytes);
   EXPECT_EQ(3 * stats.spilledPartitions, sumStats.spilledPartitions);
+}
+
+TEST(SpillerTest, spillLevel) {
+  const uint8_t kInitialBitOffset = 16;
+  const uint8_t kNumPartitionsBits = 3;
+  const HashBitRange partitionBits(
+      kInitialBitOffset, kInitialBitOffset + kNumPartitionsBits);
+  const Spiller::Config config(
+      "fakeSpillPath", 0.0, nullptr, 0, partitionBits, 0, 0);
+  struct {
+    uint8_t bitOffset;
+    // Indicates an invalid if 'expectedLevel' is negative.
+    int32_t expectedLevel;
+
+    std::string debugString() const {
+      return fmt::format(
+          "bitOffset:{}, expectedLevel:{}", bitOffset, expectedLevel);
+    }
+  } testSettings[] = {
+      {0, -1},
+      {kInitialBitOffset - 1, -1},
+      {kInitialBitOffset - kNumPartitionsBits, -1},
+      {kInitialBitOffset, 0},
+      {kInitialBitOffset + 1, -1},
+      {kInitialBitOffset + kNumPartitionsBits, 1},
+      {kInitialBitOffset + 3 * kNumPartitionsBits, 3},
+      {kInitialBitOffset + 15 * kNumPartitionsBits, 15},
+      {kInitialBitOffset + 16 * kNumPartitionsBits, -1}};
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.debugString());
+    if (testData.expectedLevel == -1) {
+      ASSERT_ANY_THROW(config.spillLevel(testData.bitOffset));
+    } else {
+      ASSERT_EQ(config.spillLevel(testData.bitOffset), testData.expectedLevel);
+    }
+  }
+}
+
+TEST(SpillerTest, spillLevelLimit) {
+  struct {
+    uint8_t startBitOffset;
+    int32_t numBits;
+    uint8_t bitOffset;
+    int32_t maxSpillLevel;
+    int32_t expectedExceeds;
+
+    std::string debugString() const {
+      return fmt::format(
+          "startBitOffset:{}, numBits:{}, bitOffset:{}, maxSpillLevel:{}, expectedExceeds:{}",
+          startBitOffset,
+          numBits,
+          bitOffset,
+          maxSpillLevel,
+          expectedExceeds);
+    }
+  } testSettings[] = {
+      {0, 2, 2, 0, true},
+      {0, 2, 2, 1, false},
+      {0, 2, 4, 0, true},
+      {0, 2, 0, -1, false},
+      {0, 2, 62, -1, false},
+      {0, 2, 63, -1, true},
+      {0, 2, 64, -1, true},
+      {0, 2, 65, -1, true},
+      {30, 3, 30, 0, false},
+      {30, 3, 33, 0, true},
+      {30, 3, 30, 1, false},
+      {30, 3, 33, 1, false},
+      {30, 3, 36, 1, true},
+      {30, 3, 0, -1, false},
+      {30, 3, 60, -1, false},
+      {30, 3, 63, -1, true},
+      {30, 3, 66, -1, true}};
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.debugString());
+
+    const HashBitRange partitionBits(
+        testData.startBitOffset, testData.startBitOffset + testData.numBits);
+    const Spiller::Config config(
+        "fakeSpillPath",
+        0.0,
+        nullptr,
+        0,
+        partitionBits,
+        testData.maxSpillLevel,
+        0);
+
+    ASSERT_EQ(
+        testData.expectedExceeds,
+        config.exceedSpillLevelLimit(testData.bitOffset));
+  }
 }
