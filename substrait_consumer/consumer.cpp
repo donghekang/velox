@@ -48,7 +48,7 @@ void readSubstraitPlan(const char* path, ::substrait::Plan& plan) {
 void registerFunctions() {
   functions::prestosql::registerAllScalarFunctions();
   aggregate::prestosql::registerAllAggregateFunctions();
-  registerMyBitmapGetFunction();
+  registerMyBitmapScalarFunction();
   registerBitmapORAggregates();
   registerReconstructAggregates();
 }
@@ -145,6 +145,7 @@ int main(int argc, char** argv) {
       ((end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec)) /
       1000000.0;
   printf("Total time: %f seconds\n", time_value);
+  fflush(stdout);
 
   return 0;
 }

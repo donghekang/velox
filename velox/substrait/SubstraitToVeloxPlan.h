@@ -44,6 +44,9 @@ class SubstraitVeloxPlanConverter {
     dwio::common::FileFormat format;
   };
 
+  /// Convert Substrait JoinRel into Velox PlanNode.
+  core::PlanNodePtr toVeloxPlan(const ::substrait::JoinRel& joinRel);
+
   core::PlanNodePtr toVeloxPlan(const ::substrait::ExchangeRel& exchangeRel);
 
   /// Convert Substrait SetRel into Velox PlanNode
@@ -124,6 +127,11 @@ class SubstraitVeloxPlanConverter {
   void flattenConditions(
       const ::substrait::Expression& substraitFilter,
       std::vector<::substrait::Expression_ScalarFunction>& scalarFunctions);
+
+  void extractJoinKeys(
+      const ::substrait::Expression& joinExpression,
+      std::vector<const ::substrait::Expression::FieldReference*>& leftExprs,
+      std::vector<const ::substrait::Expression::FieldReference*>& rightExprs);
 
   /// The Substrait parser used to convert Substrait representations into
   /// recognizable representations.

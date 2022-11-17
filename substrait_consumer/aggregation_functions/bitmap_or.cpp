@@ -210,7 +210,7 @@ void registerBitmapORAggregates() {
         auto inputType = argTypes[0];
         VELOX_CHECK_EQ(
             inputType->kind(),
-            TypeKind::VARCHAR,
+            TypeKind::VARBINARY,
             "Unknown input type for {} aggregation {}",
             kBitmapOr,
             inputType->kindName());

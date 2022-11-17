@@ -68,7 +68,7 @@ std::shared_ptr<SubstraitParser::SubstraitType> SubstraitParser::parseType(
     }
     case ::substrait::Type::KindCase::kBinary: {
       typeName = "VARBINARY";
-      nullability = substraitType.string().nullability();
+      nullability = substraitType.binary().nullability();
       break;
     }
     case ::substrait::Type::KindCase::kStruct: {

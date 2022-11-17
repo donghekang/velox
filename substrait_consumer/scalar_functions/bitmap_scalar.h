@@ -1,1 +1,1 @@
-void registerMyBitmapGetFunction();
+void registerMyBitmapScalarFunction();
