@@ -15,6 +15,7 @@
  */
 #include "velox/vector/VectorSaver.h"
 #include <fstream>
+#include "velox/common/base/Fs.h"
 #include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/exec/tests/utils/TempFilePath.h"
 #include "velox/vector/fuzzer/VectorFuzzer.h"
@@ -154,30 +155,30 @@ class VectorSaverTest : public testing::Test, public VectorTestBase {
   // vector (if already loaded).
   void assertEqualLazyVectors(
       const VectorPtr& expected,
-      const VectorPtr& actual) {
+      const VectorPtr& actual,
+      const SelectivityVector& rows) {
     // Verify encoding of Lazy.
     ASSERT_EQ(expected->encoding(), actual->encoding());
     ASSERT_EQ(*expected->type(), *actual->type());
     ASSERT_EQ(expected->size(), actual->size());
 
-    auto lazy = expected->as<LazyVector>();
-    auto lazyCopy = actual->as<LazyVector>();
-    // Verify the loaded vector is present.
-    ASSERT_EQ(lazy->isLoaded(), lazyCopy->isLoaded());
-    if (lazy->isLoaded()) {
-      assertEqualEncodings(
-          lazy->loadedVectorShared(), lazyCopy->loadedVectorShared());
+    // Verify whether the loaded vector is present.
+    ASSERT_EQ(isLazyNotLoaded(*expected), isLazyNotLoaded(*actual));
+    if (!isLazyNotLoaded(*actual)) {
+      // Check only the rows loaded.
+      assertEqualVectors(expected, actual, rows);
     }
   }
 
   // Test round trip of lazy vector both with and without loading. The vector
   // gets loaded with a randomly generated selectivity vector.
   void testRoundTripOfLazy(VectorPtr vector, VectorFuzzer& fuzzer) {
-    auto copy = takeRoundTrip(vector);
-    assertEqualLazyVectors(vector, copy);
-
-    // Verify loaded lazy vector makes the round trip
     SelectivityVector rows(vector->size());
+    auto copy = takeRoundTrip(vector);
+    assertEqualLazyVectors(vector, copy, rows);
+
+    // Verify loaded lazy vector makes the round trip by loading it for a
+    // random set of rows.
     for (int i = 0; i < vector->size(); ++i) {
       if (fuzzer.coinToss(0.3)) {
         rows.setValid(i, false);
@@ -187,7 +188,7 @@ class VectorSaverTest : public testing::Test, public VectorTestBase {
     LazyVector::ensureLoadedRows(vector, rows);
     copy = takeRoundTrip(vector);
     LazyVector::ensureLoadedRows(copy, rows);
-    assertEqualLazyVectors(vector, copy);
+    assertEqualLazyVectors(vector, copy, rows);
   }
 
   const uint32_t seed_{folly::Random::rand32()};
@@ -209,6 +210,7 @@ TEST_F(VectorSaverTest, types) {
 
   testTypeRoundTrip(TIMESTAMP());
   testTypeRoundTrip(DATE());
+  testTypeRoundTrip(INTERVAL_DAY_TIME());
 
   testTypeRoundTrip(ARRAY(BIGINT()));
   testTypeRoundTrip(ARRAY(ARRAY(VARCHAR())));
@@ -279,6 +281,11 @@ TEST_F(VectorSaverTest, flatVarchar) {
   opts.stringLength = 6;
   opts.vectorSize = 1024;
   testRoundTrip(opts, VARCHAR());
+}
+
+TEST_F(VectorSaverTest, flatIntervalDayTime) {
+  VectorFuzzer::Options opts = fuzzerOptions();
+  testRoundTrip(opts, INTERVAL_DAY_TIME());
 }
 
 TEST_F(VectorSaverTest, row) {
@@ -541,7 +548,7 @@ TEST_F(VectorSaverTest, exceptionContext) {
   auto messageFunction = [](VeloxException::Type /*exceptionType*/,
                             auto* arg) -> std::string {
     auto* info = static_cast<VectorSaverInfo*>(arg);
-    auto filePath = generateFilePath(info->path, "vector");
+    auto filePath = common::generateTempFilePath(info->path, "vector");
     if (!filePath.has_value()) {
       return "Cannot generate file path to store the vector.";
     }

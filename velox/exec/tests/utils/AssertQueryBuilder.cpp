@@ -43,7 +43,8 @@ AssertQueryBuilder::AssertQueryBuilder(
 AssertQueryBuilder::AssertQueryBuilder(DuckDbQueryRunner& duckDbQueryRunner)
     : duckDbQueryRunner_{&duckDbQueryRunner} {}
 
-AssertQueryBuilder::AssertQueryBuilder(const core::PlanNodePtr& plan) {
+AssertQueryBuilder::AssertQueryBuilder(const core::PlanNodePtr& plan)
+    : duckDbQueryRunner_(nullptr) {
   params_.planNode = plan;
 }
 
@@ -192,7 +193,9 @@ AssertQueryBuilder::readCursor() {
 
   if (!configs_.empty()) {
     if (!params_.queryCtx) {
-      params_.queryCtx = core::QueryCtx::createForTest();
+      // NOTE: the destructor of 'executor_' will wait for all the async task
+      // activities to finish on AssertQueryBuilder dtor.
+      params_.queryCtx = std::make_shared<core::QueryCtx>(executor_.get());
     }
     params_.queryCtx->setConfigOverridesUnsafe(std::move(configs_));
   }

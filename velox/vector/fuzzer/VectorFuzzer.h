@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include <folly/Random.h>
+#include <boost/random/uniform_01.hpp>
 #include <random>
 
 #include "velox/type/Type.h"
@@ -229,10 +229,11 @@ class VectorFuzzer {
 
   /// Returns true n% of times (`n` is a double between 0 and 1).
   bool coinToss(double n) {
-    return folly::Random::randDouble01(rng_) < n;
+    return boost::random::uniform_01<double>()(rng_) < n;
   }
 
-  // Wraps the given vector in a LazyVector.
+  // Wraps the given vector in a LazyVector. If there are multiple dictionary
+  // layers then the lazy wrap is applied over the innermost dictionary layer.
   static VectorPtr wrapInLazyVector(VectorPtr baseVector);
 
   // Randomly applies wrapInLazyVector() to the children of the given input row

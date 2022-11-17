@@ -244,8 +244,11 @@ void SimpleMemoryTracker::update(int64_t size, bool mock) {
   }
   int64_t previousUsage =
       totalUserMemory_.fetch_add(size, std::memory_order_relaxed);
-  if (previousUsage + size > userMemoryQuota_) {
-    VELOX_MEM_CAP_EXCEEDED(userMemoryQuota_);
+  if (size > 0 && previousUsage + size > userMemoryQuota_) {
+    VELOX_MEM_CAP_EXCEEDED(fmt::format(
+        MEM_CAP_EXCEEDED_ERROR_FORMAT.data(),
+        succinctBytes(userMemoryQuota_),
+        succinctBytes(size)));
   }
 }
 
