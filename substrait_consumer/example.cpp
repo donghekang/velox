@@ -41,7 +41,7 @@ using namespace facebook::velox;
 
 int main(int argc, char** argv) {
   folly::init(&argc, &argv);
-  auto pool = memory::getDefaultScopedMemoryPool();
+  auto pool = memory::getDefaultMemoryPool();
 
   auto inputRowType = ROW({{"my_col", BIGINT()}});
   const size_t vectorSize = 10;
@@ -74,8 +74,15 @@ int main(int argc, char** argv) {
           .window(
               {"nth_value(my_col, 1) over (range between 2 preceding and 2 following) as a"})
           .planFragment();
+
+  std::shared_ptr<folly::Executor> executor(
+      std::make_shared<folly::CPUThreadPoolExecutor>(
+          std::thread::hardware_concurrency()));
   auto windowTask = std::make_shared<exec::Task>(
-      "my_window_task", windowPlanFragment, 0, core::QueryCtx::createForTest());
+      "my_window_task",
+      windowPlanFragment,
+      0,
+      std::make_shared<core::QueryCtx>(executor.get()));
   while (auto result = windowTask->next()) {
     for (vector_size_t i = 0; i < result->size(); i++)
       printf("%s\n", result->toString(i).c_str());

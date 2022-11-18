@@ -108,7 +108,7 @@ int main(int argc, char** argv) {
   }
 
   folly::init(&argc, &argv);
-  auto pool = memory::getDefaultScopedMemoryPool();
+  auto pool = memory::getDefaultMemoryPool();
   registerConnector();
   registerFunctions();
 
@@ -123,11 +123,16 @@ int main(int argc, char** argv) {
   exec::test::AssertQueryBuilder query_builder(plan_node);
   addSplits(plan_converter.splitInfos(), query_builder);
 
-  int driver_per_pipeline = 12;
+  int thread_num = 12;
   if (argc == 3)
-    driver_per_pipeline = atoi(argv[2]);
-  query_builder.maxDrivers(driver_per_pipeline);
-  printf("Thread per pipeline: %d\n", driver_per_pipeline);
+    thread_num = atoi(argv[2]);
+  // query_builder.maxDrivers(driver_per_pipeline);
+  // printf("Thread per pipeline: %d\n", driver_per_pipeline);
+  std::shared_ptr<folly::Executor> executor(
+      std::make_shared<folly::CPUThreadPoolExecutor>(thread_num));
+  query_builder.queryCtx(std::make_shared<core::QueryCtx>(executor.get()));
+  query_builder.maxDrivers(thread_num);
+  printf("Number of threads: %d\n", thread_num);
 
   int printStats = false;
 #ifdef VERBOSE
