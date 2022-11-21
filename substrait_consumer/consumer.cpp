@@ -25,24 +25,18 @@
 namespace velox = facebook::velox;
 using namespace facebook::velox;
 
-//#define VERBOSE
+#define VERBOSE
 
 const std::string kHiveConnectorId = "test-hive";
 
 void readSubstraitPlan(const char* path, ::substrait::Plan& plan) {
-  std::ifstream ifile(path);
-  std::stringstream buffer;
-  buffer << ifile.rdbuf();
+  std::ifstream ifile(path, std::ios::binary);
+  if (!ifile) {
+    VELOX_FAIL("Cannot open file: ", path);
+  } else if (!plan.ParseFromIstream(&ifile)) {
+    VELOX_FAIL("Failed to parse plan");
+  }
   ifile.close();
-
-  std::string substrait_json = buffer.str();
-  auto status =
-      google::protobuf::util::JsonStringToMessage(substrait_json, &plan);
-  VELOX_CHECK(
-      status.ok(),
-      "Failed to parse Substrait Json: {} {}",
-      status.code(),
-      status.message());
 }
 
 void registerFunctions() {
