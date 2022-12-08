@@ -33,3 +33,45 @@ target_link_libraries(
     velox_functions_prestosql
     velox_exec_test_lib
 )
+
+add_executable(join 
+    model/join.cpp)
+
+target_link_libraries(join 
+    velox_type
+    velox_vector
+    velox_exec
+    velox_exec_test_lib
+    velox_hive_connector
+    velox_memory
+    velox_functions_prestosql
+) 
+
+add_executable(aggregate 
+    model/aggregate.cpp 
+    aggregation_functions/bitmap_or.cpp
+    aggregation_functions/reconstruct.cpp)
+
+
+target_link_libraries(aggregate 
+    velox_type
+    velox_vector
+    velox_exec
+    velox_exec_test_lib
+    velox_hive_connector
+    velox_memory
+    velox_functions_prestosql
+) 
+
+add_executable(nway_join 
+    model/n-way-join.cpp)
+
+target_link_libraries(nway_join 
+    velox_type
+    velox_vector
+    velox_exec
+    velox_exec_test_lib
+    velox_hive_connector
+    velox_memory
+    velox_functions_prestosql
+) 

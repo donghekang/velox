@@ -25,7 +25,7 @@
 namespace velox = facebook::velox;
 using namespace facebook::velox;
 
-#define VERBOSE
+//#define VERBOSE
 
 const std::string kHiveConnectorId = "test-hive";
 
