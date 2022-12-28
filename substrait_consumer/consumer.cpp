@@ -1,4 +1,5 @@
 #include <folly/init/Init.h>
+#include <google/protobuf/text_format.h>
 #include <google/protobuf/util/json_util.h>
 #include <sys/time.h>
 #include <fstream>
@@ -25,7 +26,7 @@
 namespace velox = facebook::velox;
 using namespace facebook::velox;
 
-//#define VERBOSE
+#define VERBOSE
 
 const std::string kHiveConnectorId = "test-hive";
 
@@ -37,6 +38,18 @@ void readSubstraitPlan(const char* path, ::substrait::Plan& plan) {
     VELOX_FAIL("Failed to parse plan");
   }
   ifile.close();
+}
+
+void readSubstraitPlanString(const char* path, ::substrait::Plan& plan) {
+  std::ifstream ifile(path);
+  std::stringstream buffer;
+  buffer << ifile.rdbuf();
+  ifile.close();
+
+  std::string substrait_json = buffer.str();
+  auto status =
+      google::protobuf::TextFormat::ParseFromString(substrait_json, &plan);
+  VELOX_CHECK(status, "Failed to parse Substrait");
 }
 
 void registerFunctions() {
@@ -110,7 +123,7 @@ int main(int argc, char** argv) {
   gettimeofday(&start, NULL);
 
   ::substrait::Plan substriat_plan;
-  readSubstraitPlan(argv[1], substriat_plan);
+  readSubstraitPlanString(argv[1], substriat_plan);
   velox::substrait::SubstraitVeloxPlanConverter plan_converter(pool.get());
   auto plan_node = plan_converter.toVeloxPlan(substriat_plan);
 
