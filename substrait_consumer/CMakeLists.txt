@@ -34,18 +34,18 @@ target_link_libraries(
     velox_exec_test_lib
 )
 
-add_executable(join 
-    model/join.cpp)
+# add_executable(join 
+#     model/join.cpp)
 
-target_link_libraries(join 
-    velox_type
-    velox_vector
-    velox_exec
-    velox_exec_test_lib
-    velox_hive_connector
-    velox_memory
-    velox_functions_prestosql
-) 
+# target_link_libraries(join 
+#     velox_type
+#     velox_vector
+#     velox_exec
+#     velox_exec_test_lib
+#     velox_hive_connector
+#     velox_memory
+#     velox_functions_prestosql
+# ) 
 
 add_executable(aggregate 
     model/aggregate.cpp 
@@ -63,15 +63,15 @@ target_link_libraries(aggregate
     velox_functions_prestosql
 ) 
 
-add_executable(nway_join 
-    model/n-way-join.cpp)
+# add_executable(nway_join 
+#     model/n-way-join.cpp)
 
-target_link_libraries(nway_join 
-    velox_type
-    velox_vector
-    velox_exec
-    velox_exec_test_lib
-    velox_hive_connector
-    velox_memory
-    velox_functions_prestosql
-) 
+# target_link_libraries(nway_join 
+#     velox_type
+#     velox_vector
+#     velox_exec
+#     velox_exec_test_lib
+#     velox_hive_connector
+#     velox_memory
+#     velox_functions_prestosql
+# ) 

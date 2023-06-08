@@ -26,6 +26,8 @@
 namespace velox = facebook::velox;
 using namespace facebook::velox;
 
+extern std::unordered_map<void*, int64_t> my_io_size;
+
 #define VERBOSE
 
 const std::string kHiveConnectorId = "test-hive";
@@ -157,6 +159,17 @@ int main(int argc, char** argv) {
       ((end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec)) /
       1000000.0;
   printf("Total time: %f seconds\n", time_value);
+
+  int64_t total_io_size = 0;
+  for (auto it = my_io_size.begin(); it != my_io_size.end(); it++) {
+    // printf("IO size %ld bytes\n", it->second);
+    total_io_size += it->second;
+  }
+  printf(
+      "TableScan Op (%ld) reads I/O size %ld bytes\n",
+      my_io_size.size(),
+      total_io_size);
+
   fflush(stdout);
 
   return 0;

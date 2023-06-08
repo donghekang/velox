@@ -18,6 +18,9 @@
 #include "velox/exec/Task.h"
 #include "velox/expression/Expr.h"
 
+std::mutex my_io_size_mutex;
+std::unordered_map<void*, int64_t> my_io_size;
+
 namespace facebook::velox::exec {
 
 TableScan::TableScan(
@@ -123,6 +126,11 @@ RowVectorPtr TableScan::getOutput() {
               RuntimeCounter::Unit::kNanos));
       lockedStats->rawInputPositions = dataSource_->getCompletedRows();
       lockedStats->rawInputBytes = dataSource_->getCompletedBytes();
+
+      my_io_size_mutex.lock();
+      my_io_size[this] = dataSource_->getCompletedBytes();
+      my_io_size_mutex.unlock();
+
       auto data = dataOptional.value();
       if (data) {
         if (data->size() > 0) {
