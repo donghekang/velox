@@ -63,6 +63,23 @@ target_link_libraries(aggregate
     velox_functions_prestosql
 ) 
 
+
+add_executable(single 
+    split_engine_motivation/single.cpp)
+
+
+target_link_libraries(single 
+    velox_type
+    velox_vector
+    velox_exec
+    velox_exec_test_lib
+    velox_vector_test_lib
+    velox_hive_connector
+    velox_memory
+    velox_dwio_parquet_reader
+    velox_functions_prestosql
+) 
+
 # add_executable(nway_join 
 #     model/n-way-join.cpp)
 
