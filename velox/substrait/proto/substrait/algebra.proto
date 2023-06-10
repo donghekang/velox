@@ -366,10 +366,11 @@ message Rel {
     ExtensionLeafRel extension_leaf = 11;
     CrossRel cross = 12;
     ExchangeRel exchange = 13;
+    WriteRel write = 14;
 
     //Physical relations
-    HashJoinRel hash_join = 14;
-    MergeJoinRel merge_join = 15;
+    HashJoinRel hash_join = 15;
+    MergeJoinRel merge_join = 16;
   }
 }
 

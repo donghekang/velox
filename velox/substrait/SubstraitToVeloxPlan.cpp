@@ -719,6 +719,71 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
 }
 
 core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
+    const ::substrait::WriteRel& writeRel) {
+  auto childNode = convertSingleInput<::substrait::WriteRel>(writeRel);
+  auto inputType = childNode->outputType();
+
+  // convert the output location
+  VELOX_CHECK_EQ(
+      writeRel.write_type_case(),
+      ::substrait::WriteRel::WriteTypeCase::kNamedTable,
+      "Substrait WriteRel can only write to a NamedObject");
+  std::string targetPath;
+  for (auto n : writeRel.named_table().names())
+    targetPath += "/" + n;
+  std::shared_ptr<connector::hive::LocationHandle> locationHandle;
+  switch (writeRel.op()) {
+    case ::substrait::WriteRel::WRITE_OP_CTAS:
+      locationHandle = std::make_shared<connector::hive::LocationHandle>(
+          targetPath,
+          targetPath,
+          connector::hive::LocationHandle::TableType::kNew);
+      break;
+    case ::substrait::WriteRel::WRITE_OP_INSERT:
+      locationHandle = std::make_shared<connector::hive::LocationHandle>(
+          targetPath,
+          targetPath,
+          connector::hive::LocationHandle::TableType::kExisting);
+      break;
+    default:
+      VELOX_FAIL("Unsupported WriteOp ", writeRel.op());
+      break;
+  }
+
+  // create table handle
+  std::vector<std::string> writeColumnNames;
+  for (auto n : writeRel.table_schema().names())
+    writeColumnNames.push_back(n);
+  VELOX_CHECK_EQ(
+      inputType->size(),
+      writeColumnNames.size(),
+      "Input stream and the write schema must have the same number of attributes");
+  std::vector<std::shared_ptr<const connector::hive::HiveColumnHandle>>
+      columnHandles;
+  for (int i = 0; i < inputType->size(); i++)
+    columnHandles.push_back(std::make_shared<connector::hive::HiveColumnHandle>(
+        writeColumnNames[i],
+        connector::hive::HiveColumnHandle::ColumnType::kRegular,
+        inputType->childAt(i)));
+
+  static const std::string kHiveConnectorId = "test-hive";
+  auto insertTableHandel = std::make_shared<core::InsertTableHandle>(
+      kHiveConnectorId,
+      std::make_shared<connector::hive::HiveInsertTableHandle>(
+          columnHandles, locationHandle, dwio::common::FileFormat::PARQUET));
+
+  auto outputType = ROW({"rowCount"}, {BIGINT()});
+  return std::make_shared<core::TableWriteNode>(
+      nextPlanNodeId(),
+      inputType,
+      writeColumnNames,
+      insertTableHandel,
+      outputType,
+      connector::CommitStrategy::kNoCommit,
+      std::move(childNode));
+}
+
+core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
     const ::substrait::Rel& rel) {
   if (rel.has_aggregate()) {
     return toVeloxPlan(rel.aggregate());
@@ -750,6 +815,9 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
   }
   if (rel.has_sort()) {
     return toVeloxPlan(rel.sort());
+  }
+  if (rel.has_write()) {
+    return toVeloxPlan(rel.write());
   }
   VELOX_NYI("Substrait conversion not supported for Rel.");
 }

@@ -78,6 +78,9 @@ class SubstraitVeloxPlanConverter {
       const ::substrait::ReadRel& readRel,
       const RowTypePtr& type);
 
+  // Convert Substrait WriteRel into velox PlanNode.
+  core::PlanNodePtr toVeloxPlan(const ::substrait::WriteRel& writeRel);
+
   /// Convert Substrait Rel into Velox PlanNode.
   core::PlanNodePtr toVeloxPlan(const ::substrait::Rel& rel);
 
