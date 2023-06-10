@@ -20,8 +20,11 @@
 
 std::mutex my_io_size_mutex;
 std::unordered_map<void*, int64_t> my_io_size;
+DEFINE_int32(split_preload_per_driver, 2, "Prefetch split metadata");
 
 namespace facebook::velox::exec {
+
+std::atomic<uint64_t> TableScan::ioWaitNanos_;
 
 TableScan::TableScan(
     int32_t operatorId,
@@ -35,7 +38,16 @@ TableScan::TableScan(
           "TableScan"),
       tableHandle_(tableScanNode->tableHandle()),
       columnHandles_(tableScanNode->assignments()),
-      driverCtx_(driverCtx) {
+      driverCtx_(driverCtx),
+      connectorPool_(driverCtx_->task->addConnectorPoolLocked(
+          planNodeId(),
+          driverCtx_->pipelineId,
+          driverCtx_->driverId,
+          operatorType(),
+          tableHandle_->connectorId())),
+      readBatchSize_(driverCtx_->task->queryCtx()
+                         ->queryConfig()
+                         .preferredOutputBatchRows()) {
   connector_ = connector::getConnector(tableHandle_->connectorId());
 }
 
@@ -48,18 +60,26 @@ RowVectorPtr TableScan::getOutput() {
     if (needNewSplit_) {
       exec::Split split;
       blockingReason_ = driverCtx_->task->getSplitOrFuture(
-          driverCtx_->splitGroupId, planNodeId(), split, blockingFuture_);
+          driverCtx_->splitGroupId,
+          planNodeId(),
+          split,
+          blockingFuture_,
+          maxPreloadedSplits_,
+          splitPreloader_);
       if (blockingReason_ != BlockingReason::kNotBlocked) {
         return nullptr;
       }
 
       if (!split.hasConnectorSplit()) {
         noMoreSplits_ = true;
-
         if (dataSource_) {
           auto connectorStats = dataSource_->runtimeStats();
           auto lockedStats = stats_.wlock();
           for (const auto& [name, counter] : connectorStats) {
+            if (name == "ioWaitNanos") {
+              ioWaitNanos_ += counter.value - lastIoWaitNanos_;
+              lastIoWaitNanos_ = counter.value;
+            }
             if (UNLIKELY(lockedStats->runtimeStats.count(name) == 0)) {
               lockedStats->runtimeStats.insert(
                   std::make_pair(name, RuntimeMetric(counter.unit)));
@@ -83,7 +103,7 @@ RowVectorPtr TableScan::getOutput() {
 
       if (!dataSource_) {
         connectorQueryCtx_ = operatorCtx_->createConnectorQueryCtx(
-            connectorSplit->connectorId, planNodeId());
+            connectorSplit->connectorId, planNodeId(), connectorPool_);
         dataSource_ = connector_->createDataSource(
             outputType_,
             tableHandle_,
@@ -96,15 +116,46 @@ RowVectorPtr TableScan::getOutput() {
       }
 
       debugString_ = fmt::format(
-          "Split {} Task {}",
+          "Split [{}] Task {}",
           connectorSplit->toString(),
           operatorCtx_->task()->taskId());
-      dataSource_->addSplit(connectorSplit);
+
+      ExceptionContextSetter exceptionContext(
+          {[](VeloxException::Type /*exceptionType*/, auto* debugString) {
+             return *static_cast<std::string*>(debugString);
+           },
+           &debugString_});
+
+      if (connectorSplit->dataSource) {
+        ++numPreloadedSplits_;
+        // The AsyncSource returns a unique_ptr to a shared_ptr. The
+        // unique_ptr will be nullptr if there was a cancellation.
+        numReadyPreloadedSplits_ += connectorSplit->dataSource->hasValue();
+        auto preparedDataSource = connectorSplit->dataSource->move();
+        if (!preparedDataSource) {
+          // There must be a cancellation.
+          VELOX_CHECK(operatorCtx_->task()->isCancelled());
+          return nullptr;
+        }
+        dataSource_->setFromDataSource(std::move(preparedDataSource));
+      } else {
+        dataSource_->addSplit(connectorSplit);
+      }
       ++stats_.wlock()->numSplits;
-      setBatchSize();
+
+      auto estimatedRowSize = dataSource_->estimatedRowSize();
+      readBatchSize_ =
+          estimatedRowSize == connector::DataSource::kUnknownRowSize
+          ? outputBatchRows()
+          : outputBatchRows(estimatedRowSize);
     }
 
     const auto ioTimeStartMicros = getCurrentTimeMicro();
+    // Check for  cancellation since scans that filter everything out will not
+    // hit the check in Driver.
+    if (operatorCtx_->task()->isCancelled()) {
+      return nullptr;
+    }
     ExceptionContextSetter exceptionContext(
         {[](VeloxException::Type /*exceptionType*/, auto* debugString) {
            return *static_cast<std::string*>(debugString);
@@ -112,10 +163,7 @@ RowVectorPtr TableScan::getOutput() {
          &debugString_});
 
     auto dataOptional = dataSource_->next(readBatchSize_, blockingFuture_);
-    if (!dataOptional.has_value()) {
-      blockingReason_ = BlockingReason::kWaitForConnector;
-      return nullptr;
-    }
+    checkPreload();
 
     {
       auto lockedStats = stats_.wlock();
@@ -124,6 +172,12 @@ RowVectorPtr TableScan::getOutput() {
           RuntimeCounter(
               (getCurrentTimeMicro() - ioTimeStartMicros) * 1'000,
               RuntimeCounter::Unit::kNanos));
+
+      if (!dataOptional.has_value()) {
+        blockingReason_ = BlockingReason::kWaitForConnector;
+        return nullptr;
+      }
+
       lockedStats->rawInputPositions = dataSource_->getCompletedRows();
       lockedStats->rawInputBytes = dataSource_->getCompletedBytes();
 
@@ -134,11 +188,24 @@ RowVectorPtr TableScan::getOutput() {
       auto data = dataOptional.value();
       if (data) {
         if (data->size() > 0) {
-          lockedStats->inputPositions += data->size();
-          lockedStats->inputBytes += data->retainedSize();
+          lockedStats->addInputVector(data->estimateFlatSize(), data->size());
           return data;
         }
         continue;
+      }
+    }
+
+    {
+      auto lockedStats = stats_.wlock();
+      if (numPreloadedSplits_ > 0) {
+        lockedStats->addRuntimeStat(
+            "preloadedSplits", RuntimeCounter(numPreloadedSplits_));
+        numPreloadedSplits_ = 0;
+      }
+      if (numReadyPreloadedSplits_ > 0) {
+        lockedStats->addRuntimeStat(
+            "readyPreloadedSplits", RuntimeCounter(numReadyPreloadedSplits_));
+        numReadyPreloadedSplits_ = 0;
       }
     }
 
@@ -147,22 +214,66 @@ RowVectorPtr TableScan::getOutput() {
   }
 }
 
-bool TableScan::isFinished() {
-  return noMoreSplits_;
+void TableScan::preload(std::shared_ptr<connector::ConnectorSplit> split) {
+  // The AsyncSource returns a unique_ptr to the shared_ptr of the
+  // DataSource. The callback may outlive the Task, hence it captures
+  // a shared_ptr to it. This is required to keep memory pools live
+  // for the duration. The callback checks for task cancellation to
+  // avoid needless work.
+  split->dataSource = std::make_unique<AsyncSource<connector::DataSource>>(
+      [type = outputType_,
+       table = tableHandle_,
+       columns = columnHandles_,
+       connector = connector_,
+       ctx = operatorCtx_->createConnectorQueryCtx(
+           split->connectorId, planNodeId(), connectorPool_),
+       task = operatorCtx_->task(),
+       split]() -> std::unique_ptr<connector::DataSource> {
+        if (task->isCancelled()) {
+          return nullptr;
+        }
+        auto debugString =
+            fmt::format("Split {} Task {}", split->toString(), task->taskId());
+        ExceptionContextSetter exceptionContext(
+            {[](VeloxException::Type /*exceptionType*/, auto* debugString) {
+               return *static_cast<std::string*>(debugString);
+             },
+             &debugString});
+
+        auto ptr = connector->createDataSource(type, table, columns, ctx.get());
+        if (task->isCancelled()) {
+          return nullptr;
+        }
+        ptr->addSplit(split);
+        return ptr;
+      });
 }
 
-void TableScan::setBatchSize() {
-  constexpr int64_t kMB = 1 << 20;
-  auto estimate = dataSource_->estimatedRowSize();
-  if (estimate == connector::DataSource::kUnknownRowSize) {
-    readBatchSize_ = kDefaultBatchSize;
+void TableScan::checkPreload() {
+  auto executor = connector_->executor();
+  if (FLAGS_split_preload_per_driver == 0 || !executor ||
+      !connector_->supportsSplitPreload()) {
     return;
   }
-  if (estimate < 1024) {
-    readBatchSize_ = 10000; // No more than 10MB of data per batch.
-    return;
+  if (dataSource_->allPrefetchIssued()) {
+    maxPreloadedSplits_ = driverCtx_->task->numDrivers(driverCtx_->driver) *
+        FLAGS_split_preload_per_driver;
+    if (!splitPreloader_) {
+      splitPreloader_ =
+          [executor, this](std::shared_ptr<connector::ConnectorSplit> split) {
+            preload(split);
+
+            executor->add([taskHolder = operatorCtx_->task(), split]() mutable {
+              split->dataSource->prepare();
+              split.reset();
+            });
+          };
+    }
   }
-  readBatchSize_ = std::min<int64_t>(100, 10 * kMB / estimate);
+}
+
+bool TableScan::isFinished() {
+  return noMoreSplits_;
 }
 
 void TableScan::addDynamicFilter(

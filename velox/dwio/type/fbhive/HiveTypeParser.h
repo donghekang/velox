@@ -34,6 +34,7 @@ enum class TokenType {
   Byte,
   Short,
   Integer,
+  Date,
   Long,
   Float,
   Double,
@@ -50,7 +51,7 @@ enum class TokenType {
   Number,
   Identifier,
   EndOfStream,
-  ShortDecimal,
+  Decimal,
   LeftRoundBracket,
   RightRoundBracket,
   MaxTokenType

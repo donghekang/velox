@@ -42,6 +42,10 @@ ifdef AWSSDK_ROOT_DIR
 CMAKE_FLAGS += -DAWSSDK_ROOT_DIR=$(AWSSDK_ROOT_DIR)
 endif
 
+ifdef GCSSDK_ROOT_DIR
+CMAKE_FLAGS += -DGCSSDK_ROOT_DIR=$(GCSSDK_ROOT_DIR)
+endif
+
 # Use Ninja if available. If Ninja is used, pass through parallelism control flags.
 USE_NINJA ?= 1
 ifeq ($(USE_NINJA), 1)
@@ -61,6 +65,8 @@ CPU_TARGET ?= "avx"
 
 FUZZER_SEED ?= 123456
 FUZZER_DURATION_SEC ?= 60
+
+PYTHON_EXECUTABLE ?= $(shell which python)
 
 all: release			#: Build the release version
 
@@ -93,11 +99,14 @@ min_debug:				#: Minimal build with debugging symbols
 	$(MAKE) build BUILD_DIR=debug
 
 benchmarks-basic-build:
-	$(MAKE) release EXTRA_CMAKE_FLAGS="-DVELOX_BUILD_MINIMAL=OFF -DVELOX_ENABLE_BENCHMARKS_BASIC=ON"
+	$(MAKE) release EXTRA_CMAKE_FLAGS="-DVELOX_BUILD_BENCHMARKS=ON"
 
 benchmarks-basic-run:
-	$(MAKE) benchmarks-basic-build
-	scripts/veloxbench/veloxbench/cpp_micro_benchmarks.py
+	scripts/benchmark-runner.py run \
+			--bm_estimate_time \
+			--bm_max_secs 10 \
+			--bm_max_trials 10000 \
+			${EXTRA_BENCHMARK_FLAGS}
 
 unittest: debug			#: Build with debugging and run unit tests
 	cd $(BUILD_BASE_DIR)/debug && ctest -j ${NUM_THREADS} -VV --output-on-failure
@@ -106,11 +115,11 @@ unittest: debug			#: Build with debugging and run unit tests
 # ensure the tests are reproducible.
 fuzzertest: debug
 	$(BUILD_BASE_DIR)/debug/velox/expression/tests/velox_expression_fuzzer_test \
-		--seed $(FUZZER_SEED) \
-		--duration_sec $(FUZZER_DURATION_SEC) \
-		--repro_persist_path $(FUZZER_REPRO_PERSIST_PATH) \
-		--logtostderr=1 \
-		--minloglevel=0
+			--seed $(FUZZER_SEED) \
+			--duration_sec $(FUZZER_DURATION_SEC) \
+			--repro_persist_path $(FUZZER_REPRO_PERSIST_PATH) \
+			--logtostderr=1 \
+			--minloglevel=0
 
 format-fix: 			#: Fix formatting issues in the main branch
 	scripts/check.py format main --fix
@@ -145,3 +154,12 @@ help:					#: Show the help messages
 	@cat $(firstword $(MAKEFILE_LIST)) | \
 	awk '/^[-a-z]+:/' | \
 	awk -F: '{ printf("%-20s   %s\n", $$1, $$NF) }'
+
+python-clean:
+	DEBUG=1 ${PYTHON_EXECUTABLE} setup.py clean
+
+python-build:
+	DEBUG=1 CMAKE_BUILD_PARALLEL_LEVEL=4 ${PYTHON_EXECUTABLE} setup.py develop
+
+python-test: python-build
+	DEBUG=1 ${PYTHON_EXECUTABLE} -m unittest -v

@@ -42,7 +42,7 @@ using namespace facebook::velox;
 
 int main(int argc, char** argv) {
   folly::init(&argc, &argv);
-  auto pool = memory::getDefaultMemoryPool();
+  auto pool = memory::addDefaultLeafMemoryPool();
 
   auto build_type = ROW({{"build_0", BIGINT()}, {"build_1", BIGINT()}});
   auto probe_type = ROW({{"probe_0", BIGINT()}, {"probe_1", BIGINT()}});

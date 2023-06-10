@@ -19,7 +19,6 @@
 #include "velox/common/memory/Memory.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
-#include "velox/connectors/hive/HiveWriteProtocol.h"
 #include "velox/dwio/dwrf/reader/DwrfReader.h"
 #include "velox/exec/Task.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
@@ -46,7 +45,7 @@ int main(int argc, char** argv) {
   folly::init(&argc, &argv);
 
   // Default memory allocator used throughout this example.
-  auto pool = memory::getDefaultMemoryPool();
+  auto pool = memory::addDefaultLeafMemoryPool();
 
   // For this example, the input dataset will be comprised of a single BIGINT
   // column ("my_col"), containing 10 rows.
@@ -97,7 +96,6 @@ int main(int argc, char** argv) {
   // write protocol, in this case commit is not required:
   filesystems::registerLocalFileSystem();
   dwrf::registerDwrfReaderFactory();
-  connector::hive::HiveNoCommitWriteProtocol::registerProtocol();
 
   // Create a temporary dir to store the local file created. Note that this
   // directory is automatically removed when the `tempDir` object runs out of
@@ -127,7 +125,7 @@ int main(int argc, char** argv) {
                       {},
                       HiveConnectorTestBase::makeLocationHandle(
                           tempDir->path))),
-              connector::WriteProtocol::CommitStrategy::kNoCommit)
+              connector::CommitStrategy::kNoCommit)
           .planFragment();
 
   std::shared_ptr<folly::Executor> executor(
@@ -137,7 +135,7 @@ int main(int argc, char** argv) {
   // Task is the top-level execution concept. A task needs a taskId (as a
   // string), the plan fragment to execute, a destination (only used for
   // shuffles), and a QueryCtx containing metadata and configs for a query.
-  auto writeTask = std::make_shared<exec::Task>(
+  auto writeTask = exec::Task::create(
       "my_write_task",
       writerPlanFragment,
       /*destination=*/0,
@@ -166,7 +164,7 @@ int main(int argc, char** argv) {
                               .planFragment();
 
   // Create the reader task.
-  auto readTask = std::make_shared<exec::Task>(
+  auto readTask = exec::Task::create(
       "my_read_task",
       readPlanFragment,
       /*destination=*/0,

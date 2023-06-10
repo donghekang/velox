@@ -17,7 +17,6 @@
 #include <gtest/gtest.h>
 #include <cstring>
 #include "velox/dwio/common/InputStream.h"
-#include "velox/dwio/common/MemoryInputStream.h"
 #include "velox/dwio/common/encryption/TestProvider.h"
 #include "velox/dwio/common/exception/Exception.h"
 #include "velox/dwio/dwrf/reader/StripeReaderBase.h"
@@ -50,8 +49,9 @@ void addStats(
 class EncryptedStatsTest : public Test {
  protected:
   void SetUp() override {
-    pool_ = getDefaultMemoryPool();
-    ProtoWriter writer{*pool_};
+    pool_ = defaultMemoryManager().addRootPool("EncryptedStatsTest");
+    sinkPool_ = pool_->addLeafChild("sink");
+    ProtoWriter writer{pool_, *sinkPool_};
     auto& context = const_cast<const ProtoWriter&>(writer).getContext();
 
     // fake post script
@@ -94,9 +94,12 @@ class EncryptedStatsTest : public Test {
     auto handler = DecryptionHandler::create(*footer, &factory);
     handler_ = handler.get();
 
+    auto readFile =
+        std::make_shared<facebook::velox::InMemoryReadFile>(std::string());
+    readerPool_ = pool_->addLeafChild("reader");
     reader_ = std::make_unique<ReaderBase>(
-        *pool_,
-        std::make_unique<MemoryInputStream>(nullptr, 0),
+        *readerPool_,
+        std::make_unique<BufferedInput>(readFile, *readerPool_),
         std::make_unique<PostScript>(std::move(ps)),
         footer,
         nullptr,
@@ -114,6 +117,8 @@ class EncryptedStatsTest : public Test {
   std::unique_ptr<ReaderBase> reader_;
   DecryptionHandler* handler_;
   std::shared_ptr<MemoryPool> pool_;
+  std::shared_ptr<MemoryPool> sinkPool_;
+  std::shared_ptr<MemoryPool> readerPool_;
 };
 
 TEST_F(EncryptedStatsTest, getStatistics) {
@@ -167,7 +172,7 @@ TEST_F(EncryptedStatsTest, getColumnStatisticsKeyNotLoaded) {
 std::unique_ptr<ReaderBase> createCorruptedFileReader(
     uint64_t footerLen,
     uint32_t cacheLen) {
-  auto pool = facebook::velox::memory::getDefaultMemoryPool();
+  auto pool = facebook::velox::memory::addDefaultLeafMemoryPool();
   MemorySink sink{*pool, 1024};
   DataBufferHolder holder{*pool, 1024, 0, DEFAULT_PAGE_GROW_RATIO, &sink};
   BufferedOutputStream output{holder};
@@ -199,8 +204,10 @@ std::unique_ptr<ReaderBase> createCorruptedFileReader(
   buf.data()[0] = psLen;
 
   sink.write(std::move(buf));
-  auto input = std::make_unique<MemoryInputStream>(sink.getData(), sink.size());
-  return std::make_unique<ReaderBase>(*pool, std::move(input));
+  auto readFile = std::make_shared<facebook::velox::InMemoryReadFile>(
+      std::string_view(sink.getData(), sink.size()));
+  return std::make_unique<ReaderBase>(
+      *pool, std::make_unique<BufferedInput>(readFile, *pool));
 }
 
 TEST(ReaderBaseTest, InvalidPostScriptThrows) {

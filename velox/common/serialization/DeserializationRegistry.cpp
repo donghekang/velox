@@ -15,12 +15,22 @@
  */
 #include "velox/common/serialization/DeserializationRegistry.h"
 
-namespace facebook {
-namespace velox {
+namespace facebook::velox {
+
 DeserializationRegistryType& DeserializationRegistryForSharedPtr() {
-  static DeserializationRegistryType instance;
-  return instance;
+  static DeserializationRegistryType kRegistry;
+  return kRegistry;
 }
 
-} // namespace velox
-} // namespace facebook
+DeserializationWithContextRegistryType&
+DeserializationWithContextRegistryForSharedPtr() {
+  static DeserializationWithContextRegistryType kRegistry;
+  return kRegistry;
+}
+
+DeserializationRegistryUniquePtrType& deserializationRegistryForUniquePtr() {
+  static DeserializationRegistryUniquePtrType kRegistry;
+  return kRegistry;
+}
+
+} // namespace facebook::velox

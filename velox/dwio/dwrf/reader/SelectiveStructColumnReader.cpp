@@ -15,6 +15,7 @@
  */
 
 #include "velox/dwio/dwrf/reader/SelectiveStructColumnReader.h"
+#include "folly/Conv.h"
 #include "velox/dwio/common/ColumnLoader.h"
 #include "velox/dwio/dwrf/reader/SelectiveDwrfReader.h"
 
@@ -41,17 +42,26 @@ SelectiveStructColumnReader::SelectiveStructColumnReader(
       "Unknown encoding for StructColumnReader");
 
   const auto& cs = stripe.getColumnSelector();
-  auto& childSpecs = scanSpec.children();
+  // A reader tree may be constructed while the ScanSpec is being used
+  // for another read. This happens when the next stripe is being
+  // prepared while the previous one is reading.
+  auto& childSpecs = scanSpec.stableChildren();
   for (auto i = 0; i < childSpecs.size(); ++i) {
-    auto childSpec = childSpecs[i].get();
+    auto childSpec = childSpecs[i];
     if (childSpec->isConstant()) {
       continue;
     }
     auto childDataType = nodeType_->childByName(childSpec->fieldName());
     auto childRequestedType =
         requestedType_->childByName(childSpec->fieldName());
-    auto childParams =
-        DwrfParams(stripe, FlatMapContext{encodingKey.sequence, nullptr});
+    auto labels = params.streamLabels().append(folly::to<std::string>(i));
+    auto childParams = DwrfParams(
+        stripe,
+        labels,
+        FlatMapContext{
+            .sequence = encodingKey.sequence,
+            .inMapDecoder = nullptr,
+            .keySelectionCallback = nullptr});
     VELOX_CHECK(cs.shouldReadNode(childDataType->id));
     addChild(SelectiveDwrfReader::build(
         childRequestedType, childDataType, childParams, *childSpec));

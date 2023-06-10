@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <boost/algorithm/string.hpp>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,14 +23,11 @@
 #include <vector>
 
 #include "velox/common/base/Exceptions.h"
+#include "velox/type/Type.h"
 
 namespace facebook::velox::exec {
 
-std::string sanitizeFunctionName(const std::string& name);
-
-inline bool isCommonDecimalName(const std::string& typeName) {
-  return (typeName == "DECIMAL");
-}
+std::string sanitizeName(const std::string& name);
 
 /// Return a list of primitive type names.
 const std::vector<std::string> primitiveTypeNames();
@@ -128,7 +126,10 @@ class FunctionSignature {
       std::unordered_map<std::string, SignatureVariable> variables,
       TypeSignature returnType,
       std::vector<TypeSignature> argumentTypes,
+      std::vector<bool> constantArguments,
       bool variableArity);
+
+  virtual ~FunctionSignature() = default;
 
   const TypeSignature& returnType() const {
     return returnType_;
@@ -138,11 +139,15 @@ class FunctionSignature {
     return argumentTypes_;
   }
 
+  const std::vector<bool>& constantArguments() const {
+    return constantArguments_;
+  }
+
   bool variableArity() const {
     return variableArity_;
   }
 
-  std::string toString() const;
+  virtual std::string toString() const;
 
   const auto& variables() const {
     return variables_;
@@ -157,10 +162,15 @@ class FunctionSignature {
         variableArity_ == rhs.variableArity_;
   }
 
+ protected:
+  // Return a string of the list of argument types.
+  std::string argumentsToString() const;
+
  private:
   const std::unordered_map<std::string, SignatureVariable> variables_;
   const TypeSignature returnType_;
   const std::vector<TypeSignature> argumentTypes_;
+  const std::vector<bool> constantArguments_;
   const bool variableArity_;
 };
 
@@ -173,11 +183,13 @@ class AggregateFunctionSignature : public FunctionSignature {
       TypeSignature returnType,
       TypeSignature intermediateType,
       std::vector<TypeSignature> argumentTypes,
+      std::vector<bool> constantArguments,
       bool variableArity)
       : FunctionSignature(
             std::move(variables),
             std::move(returnType),
             std::move(argumentTypes),
+            std::move(constantArguments),
             variableArity),
         intermediateType_{std::move(intermediateType)} {}
 
@@ -185,13 +197,18 @@ class AggregateFunctionSignature : public FunctionSignature {
     return intermediateType_;
   }
 
+  std::string toString() const override;
+
  private:
   const TypeSignature intermediateType_;
 };
 
+using AggregateFunctionSignaturePtr =
+    std::shared_ptr<AggregateFunctionSignature>;
+
 namespace {
 
-void addVariable(
+inline void addVariable(
     std::unordered_map<std::string, SignatureVariable>& variables,
     const SignatureVariable& variable) {
   VELOX_USER_CHECK(
@@ -264,6 +281,13 @@ class FunctionSignatureBuilder {
 
   FunctionSignatureBuilder& argumentType(const std::string& type) {
     argumentTypes_.emplace_back(parseTypeSignature(type));
+    constantArguments_.push_back(false);
+    return *this;
+  }
+
+  FunctionSignatureBuilder& constantArgumentType(const std::string& type) {
+    argumentTypes_.emplace_back(parseTypeSignature(type));
+    constantArguments_.push_back(true);
     return *this;
   }
 
@@ -278,6 +302,7 @@ class FunctionSignatureBuilder {
   std::unordered_map<std::string, SignatureVariable> variables_;
   std::optional<TypeSignature> returnType_;
   std::vector<TypeSignature> argumentTypes_;
+  std::vector<bool> constantArguments_;
   bool variableArity_{false};
 };
 
@@ -325,6 +350,14 @@ class AggregateFunctionSignatureBuilder {
 
   AggregateFunctionSignatureBuilder& argumentType(const std::string& type) {
     argumentTypes_.emplace_back(parseTypeSignature(type));
+    constantArguments_.push_back(false);
+    return *this;
+  }
+
+  AggregateFunctionSignatureBuilder& constantArgumentType(
+      const std::string& type) {
+    argumentTypes_.emplace_back(parseTypeSignature(type));
+    constantArguments_.push_back(true);
     return *this;
   }
 
@@ -345,8 +378,25 @@ class AggregateFunctionSignatureBuilder {
   std::optional<TypeSignature> returnType_;
   std::optional<TypeSignature> intermediateType_;
   std::vector<TypeSignature> argumentTypes_;
+  std::vector<bool> constantArguments_;
   bool variableArity_{false};
 };
+
+/// Return a string representation of function signature: name(type1,
+/// type1,...). For example, foo(bigint, boolean, varchar).
+std::string toString(
+    const std::string& name,
+    const std::vector<TypePtr>& types);
+
+/// Return a string representation of a list of scalar function signatures.
+/// For example, (boolean) -> integer, (varchar, integer) -> varchar.
+std::string toString(const std::vector<FunctionSignaturePtr>& signatures);
+
+/// Return a string representation of a list of aggregate function signatures.
+/// For example, (boolean) -> varbinary -> integer, (varchar, integer) ->
+/// varbinary -> varchar.
+std::string toString(
+    const std::vector<std::shared_ptr<AggregateFunctionSignature>>& signatures);
 
 } // namespace facebook::velox::exec
 

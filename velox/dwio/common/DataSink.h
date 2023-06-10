@@ -124,7 +124,7 @@ class DataSink : public Closeable {
       size += callback(buf);
     }
     size_ += size;
-    if (stats_) {
+    if (stats_ != nullptr) {
       stats_->incRawBytesWritten(size);
     }
     // Writing buffer is treated as transferring ownership. So clearing the
@@ -133,14 +133,14 @@ class DataSink : public Closeable {
   }
 };
 
-class FileSink : public DataSink {
+class LocalFileSink : public DataSink {
  public:
-  explicit FileSink(
+  explicit LocalFileSink(
       const std::string& name,
       const MetricsLogPtr& metricLogger = MetricsLog::voidLog(),
       IoStatistics* stats = nullptr);
 
-  ~FileSink() override {
+  ~LocalFileSink() override {
     destroy();
   }
 

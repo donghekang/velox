@@ -165,8 +165,6 @@ class ArraySortFunction : public exec::VectorFunction {
   /// and 'offsets' vectors that control where output arrays start and end
   /// remain the same in the output ArrayVector.
 
-  ArraySortFunction() {}
-
   // Execute function.
   void apply(
       const SelectivityVector& rows,
@@ -185,13 +183,10 @@ class ArraySortFunction : public exec::VectorFunction {
       const auto& flatArray = constantArray->valueVector();
       const auto flatIndex = constantArray->index();
 
-      SelectivityVector singleRow(flatIndex + 1, false);
-      singleRow.setValid(flatIndex, true);
-      singleRow.updateBounds();
-
-      localResult = applyFlat(singleRow, flatArray, context);
+      exec::LocalSingleRow singleRow(context, flatIndex);
+      localResult = applyFlat(*singleRow, flatArray, context);
       localResult =
-          BaseVector::wrapInConstant(rows.size(), flatIndex, localResult);
+          BaseVector::wrapInConstant(rows.end(), flatIndex, localResult);
     } else {
       localResult = applyFlat(rows, arg, context);
     }

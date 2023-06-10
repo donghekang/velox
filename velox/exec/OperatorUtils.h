@@ -111,8 +111,8 @@ void gatherCopy(
 /// not. It is assumed that the disk spilling file hierarchy for an operator is
 /// flat.
 std::string makeOperatorSpillPath(
-    const std::string& spillPath,
-    const std::string& taskId,
+    const std::string& spillDir,
+    int pipelineId,
     int driverId,
     int32_t operatorId);
 
@@ -121,4 +121,38 @@ void addOperatorRuntimeStats(
     const std::string& name,
     const RuntimeCounter& value,
     std::unordered_map<std::string, RuntimeMetric>& stats);
+
+/// Aggregates runtime metrics we want to see per operator rather than per
+/// event.
+void aggregateOperatorRuntimeStats(
+    std::unordered_map<std::string, RuntimeMetric>& stats);
+
+/// Allocates 'mapping' to fit at least 'size' indices and initializes them to
+/// zero if 'mapping' is either: nullptr, not unique or cannot fit 'size'.
+/// Returns 'mapping' as folly::Range<vector_size_t*>. Can be used by operator
+/// to initialize / resize reusable state across batches of processing.
+folly::Range<vector_size_t*> initializeRowNumberMapping(
+    BufferPtr& mapping,
+    vector_size_t size,
+    memory::MemoryPool* pool);
+
+/// Projects children of 'src' row vector to 'dest' row vector according to
+/// 'projections' and 'mapping'. 'size' specifies number of projected rows in
+/// 'dest'.
+void projectChildren(
+    const RowVectorPtr& dest,
+    const RowVectorPtr& src,
+    const std::vector<IdentityProjection>& projections,
+    int32_t size,
+    const BufferPtr& mapping);
+
+/// Overload of the above function that takes reference to const vector of
+/// VectorPtr as 'src' argument, instead of row vector.
+void projectChildren(
+    const RowVectorPtr& dest,
+    const std::vector<VectorPtr>& src,
+    const std::vector<IdentityProjection>& projections,
+    int32_t size,
+    const BufferPtr& mapping);
+
 } // namespace facebook::velox::exec

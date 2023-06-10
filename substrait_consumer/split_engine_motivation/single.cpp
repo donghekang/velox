@@ -5,9 +5,9 @@
 #include "velox/common/memory/Memory.h"
 #include "velox/connectors/hive/HiveConnector.h"
 #include "velox/connectors/hive/HiveConnectorSplit.h"
-#include "velox/connectors/hive/HiveWriteProtocol.h"
 #include "velox/dwio/dwrf/reader/DwrfReader.h"
 #include "velox/dwio/parquet/RegisterParquetReader.h"
+#include "velox/dwio/parquet/RegisterParquetWriter.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
@@ -34,7 +34,7 @@ void registerConnector() {
   filesystems::registerLocalFileSystem();
   dwrf::registerDwrfReaderFactory();
   parquet::registerParquetReaderFactory(::parquet::ParquetReaderType::NATIVE);
-  connector::hive::HiveNoCommitWriteProtocol::registerProtocol();
+  parquet::registerParquetWriterFactory();
 }
 
 void BuildJoin(
@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
     thread_num = atoi(argv[3]);
 
   folly::init(&argc, &argv);
-  auto pool = memory::getDefaultMemoryPool();
+  auto pool = memory::addDefaultLeafMemoryPool();
 
   registerConnector();
 
@@ -86,8 +86,9 @@ int main(int argc, char** argv) {
                       {INTEGER(), INTEGER()},
                       {},
                       exec::test::HiveConnectorTestBase::makeLocationHandle(
-                          path + "/temp"))),
-              connector::WriteProtocol::CommitStrategy::kNoCommit)
+                          path + "/temp"),
+                      dwio::common::FileFormat::PARQUET)),
+              connector::CommitStrategy::kNoCommit)
           .planNode();
 
   exec::test::AssertQueryBuilder query_builder(planNode);

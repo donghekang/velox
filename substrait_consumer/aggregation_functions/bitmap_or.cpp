@@ -1,7 +1,6 @@
 #include "substrait_consumer/aggregation_functions/registerAggregate.h"
 #include "velox/exec/Aggregate.h"
 #include "velox/expression/FunctionSignature.h"
-#include "velox/functions/prestosql/aggregates/SingleValueAccumulator.h"
 #include "velox/vector/FlatVector.h"
 
 using namespace facebook::velox;
@@ -61,9 +60,9 @@ class BitmapOrAggregate : public exec::Aggregate {
       new (groups[i] + offset_) BitmapOrAccumlator();
   };
 
-  void finalize(char**, int32_t) override {
-    // Nothing to do
-  }
+  // void finalize(char**, int32_t) override {
+  //   // Nothing to do
+  // }
 
   void addRawInput(
       char** groups,

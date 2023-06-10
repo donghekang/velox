@@ -34,19 +34,6 @@ target_link_libraries(
     velox_exec_test_lib
 )
 
-# add_executable(join 
-#     model/join.cpp)
-
-# target_link_libraries(join 
-#     velox_type
-#     velox_vector
-#     velox_exec
-#     velox_exec_test_lib
-#     velox_hive_connector
-#     velox_memory
-#     velox_functions_prestosql
-# ) 
-
 add_executable(aggregate 
     model/aggregate.cpp 
     aggregation_functions/bitmap_or.cpp
@@ -77,6 +64,7 @@ target_link_libraries(single
     velox_hive_connector
     velox_memory
     velox_dwio_parquet_reader
+    velox_dwio_parquet_writer
     velox_functions_prestosql
 ) 
 

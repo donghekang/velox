@@ -29,13 +29,20 @@ std::unique_ptr<dwio::common::IntDecoder</*isSigned*/ false>> makeLengthDecoder(
   auto lenId = encodingKey.forKind(proto::Stream_Kind_LENGTH);
   bool lenVints = stripe.getUseVInts(lenId);
   return createRleDecoder</*isSigned*/ false>(
-      stripe.getStream(lenId, true),
+      stripe.getStream(lenId, params.streamLabels().label(), true),
       rleVersion,
       pool,
       lenVints,
       dwio::common::INT_BYTE_SIZE);
 }
 } // namespace
+
+FlatMapContext flatMapContextFromEncodingKey(EncodingKey& encodingKey) {
+  return FlatMapContext{
+      .sequence = encodingKey.sequence,
+      .inMapDecoder = nullptr,
+      .keySelectionCallback = nullptr};
+}
 
 SelectiveListColumnReader::SelectiveListColumnReader(
     const std::shared_ptr<const dwio::common::TypeWithId>& requestedType,
@@ -58,15 +65,19 @@ SelectiveListColumnReader::SelectiveListColumnReader(
       cs.shouldReadNode(childType->id),
       "SelectiveListColumnReader must select the values stream");
   if (scanSpec_->children().empty()) {
-    scanSpec.getOrCreateChild(common::Subfield("elements"));
+    scanSpec.getOrCreateChild(
+        common::Subfield(common::ScanSpec::kArrayElementsFieldName));
   }
   scanSpec_->children()[0]->setProjectOut(true);
   scanSpec_->children()[0]->setExtractValues(true);
 
-  auto childParams =
-      DwrfParams(stripe, FlatMapContext{encodingKey.sequence, nullptr});
+  auto childParams = DwrfParams(
+      stripe,
+      params.streamLabels(),
+      flatMapContextFromEncodingKey(encodingKey));
   child_ = SelectiveDwrfReader::build(
       childType, nodeType_->childAt(0), childParams, *scanSpec_->children()[0]);
+  children_ = {child_.get()};
 }
 
 SelectiveMapColumnReader::SelectiveMapColumnReader(
@@ -84,8 +95,10 @@ SelectiveMapColumnReader::SelectiveMapColumnReader(
   EncodingKey encodingKey{nodeType_->id, params.flatMapContext().sequence};
   auto& stripe = params.stripeStreams();
   if (scanSpec_->children().empty()) {
-    scanSpec_->getOrCreateChild(common::Subfield("keys"));
-    scanSpec_->getOrCreateChild(common::Subfield("elements"));
+    scanSpec_->getOrCreateChild(
+        common::Subfield(common::ScanSpec::kMapKeysFieldName));
+    scanSpec_->getOrCreateChild(
+        common::Subfield(common::ScanSpec::kMapValuesFieldName));
   }
   scanSpec_->children()[0]->setProjectOut(true);
   scanSpec_->children()[0]->setExtractValues(true);
@@ -97,8 +110,10 @@ SelectiveMapColumnReader::SelectiveMapColumnReader(
   VELOX_CHECK(
       cs.shouldReadNode(keyType->id),
       "Map key must be selected in SelectiveMapColumnReader");
-  auto keyParams =
-      DwrfParams(stripe, FlatMapContext{encodingKey.sequence, nullptr});
+  auto keyParams = DwrfParams(
+      stripe,
+      params.streamLabels(),
+      flatMapContextFromEncodingKey(encodingKey));
   keyReader_ = SelectiveDwrfReader::build(
       keyType,
       nodeType_->childAt(0),
@@ -109,13 +124,16 @@ SelectiveMapColumnReader::SelectiveMapColumnReader(
   VELOX_CHECK(
       cs.shouldReadNode(valueType->id),
       "Map Values must be selected in SelectiveMapColumnReader");
-  auto elementParams =
-      DwrfParams(stripe, FlatMapContext{encodingKey.sequence, nullptr});
+  auto elementParams = DwrfParams(
+      stripe,
+      params.streamLabels(),
+      flatMapContextFromEncodingKey(encodingKey));
   elementReader_ = SelectiveDwrfReader::build(
       valueType,
       nodeType_->childAt(1),
       elementParams,
       *scanSpec_->children()[1]);
+  children_ = {keyReader_.get(), elementReader_.get()};
 
   VLOG(1) << "[Map] Initialized map column reader for node " << nodeType_->id;
 }

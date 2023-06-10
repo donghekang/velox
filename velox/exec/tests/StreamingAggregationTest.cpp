@@ -24,7 +24,7 @@ class StreamingAggregationTest : public OperatorTestBase {
  protected:
   void SetUp() override {
     OperatorTestBase::SetUp();
-    registerSumNonPODAggregate("sumnonpod");
+    registerSumNonPODAggregate("sumnonpod", 64);
   }
 
   CursorParameters makeCursorParameters(
@@ -33,8 +33,8 @@ class StreamingAggregationTest : public OperatorTestBase {
     CursorParameters params;
     params.planNode = planNode;
     params.queryCtx = std::make_shared<core::QueryCtx>(executor_.get());
-    params.queryCtx->setConfigOverridesUnsafe(
-        {{core::QueryConfig::kPreferredOutputBatchSize,
+    params.queryCtx->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kPreferredOutputBatchRows,
           std::to_string(preferredOutputBatchSize)}});
     return params;
   }

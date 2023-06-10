@@ -16,7 +16,9 @@
 
 #include "velox/exec/RowContainer.h"
 
+#include "velox/exec/Aggregate.h"
 #include "velox/exec/ContainerRowSerde.h"
+#include "velox/exec/Operator.h"
 
 namespace facebook::velox::exec {
 namespace {
@@ -45,24 +47,75 @@ setBit(char* bits, uint32_t idx) {
 }
 } // namespace
 
+Accumulator::Accumulator(Aggregate* aggregate)
+    : isFixedSize_{aggregate->isFixedSize()},
+      fixedSize_{aggregate->accumulatorFixedWidthSize()},
+      usesExternalMemory_{aggregate->accumulatorUsesExternalMemory()},
+      alignment_{aggregate->accumulatorAlignmentSize()},
+      destroyFunction_{[aggregate](folly::Range<char**> groups) {
+        aggregate->destroy(groups);
+      }},
+      aggregate_{aggregate} {
+  VELOX_CHECK_NOT_NULL(aggregate_);
+}
+
+Accumulator::Accumulator(
+    bool isFixedSize,
+    int32_t fixedSize,
+    bool usesExternalMemory,
+    int32_t alignment,
+    std::function<void(folly::Range<char**> groups)> destroyFunction)
+    : isFixedSize_{isFixedSize},
+      fixedSize_{fixedSize},
+      usesExternalMemory_{usesExternalMemory},
+      alignment_{alignment},
+      destroyFunction_{destroyFunction} {}
+
+bool Accumulator::isFixedSize() const {
+  return isFixedSize_;
+}
+
+int32_t Accumulator::fixedWidthSize() const {
+  return fixedSize_;
+}
+
+bool Accumulator::usesExternalMemory() const {
+  return usesExternalMemory_;
+}
+
+int32_t Accumulator::alignment() const {
+  return alignment_;
+}
+
+void Accumulator::destroy(folly::Range<char**> groups) {
+  destroyFunction_(groups);
+}
+
+// static
+int32_t RowContainer::combineAlignments(int32_t a, int32_t b) {
+  VELOX_CHECK_EQ(__builtin_popcount(a), 1, "Alignment can only be power of 2");
+  VELOX_CHECK_EQ(__builtin_popcount(b), 1, "Alignment can only be power of 2");
+  return std::max(a, b);
+}
+
 RowContainer::RowContainer(
     const std::vector<TypePtr>& keyTypes,
     bool nullableKeys,
-    const std::vector<std::unique_ptr<Aggregate>>& aggregates,
+    const std::vector<Accumulator>& accumulators,
     const std::vector<TypePtr>& dependentTypes,
     bool hasNext,
     bool isJoinBuild,
     bool hasProbedFlag,
     bool hasNormalizedKeys,
-    memory::MappedMemory* mappedMemory,
+    memory::MemoryPool* pool,
     const RowSerde& serde)
     : keyTypes_(keyTypes),
       nullableKeys_(nullableKeys),
-      aggregates_(aggregates),
+      accumulators_(accumulators),
       isJoinBuild_(isJoinBuild),
       hasNormalizedKeys_(hasNormalizedKeys),
-      rows_(mappedMemory),
-      stringAllocator_(mappedMemory),
+      rows_(pool),
+      stringAllocator_(pool),
       serde_(serde) {
   // Compute the layout of the payload row.  The row has keys, null
   // flags, accumulators, dependent fields. All fields are fixed
@@ -108,30 +161,20 @@ RowContainer::RowContainer(
   offset = std::max<int32_t>(offset, sizeof(void*));
   int32_t firstAggregate = offsets_.size();
   int32_t firstAggregateOffset = offset;
-  for (auto& aggregate : aggregates) {
-    // Accumulator offset must be aligned by their alignment size.
-    offset = bits::roundUp(offset, aggregate->accumulatorAlignmentSize());
-    offsets_.push_back(offset);
-    offset += aggregate->accumulatorFixedWidthSize();
+  for (const auto& accumulator : accumulators) {
     nullOffsets_.push_back(nullOffset);
     ++nullOffset;
-    isVariableWidth |= !aggregate->isFixedSize();
-    usesExternalMemory_ |= aggregate->accumulatorUsesExternalMemory();
+    isVariableWidth |= !accumulator.isFixedSize();
+    usesExternalMemory_ |= accumulator.usesExternalMemory();
+    alignment_ = combineAlignments(accumulator.alignment(), alignment_);
   }
   for (auto& type : dependentTypes) {
     types_.push_back(type);
     typeKinds_.push_back(type->kind());
-    offsets_.push_back(offset);
-    offset += typeKindSize(type->kind());
     nullOffsets_.push_back(nullOffset);
     ++nullOffset;
     isVariableWidth |= !type->isFixedWidth();
   }
-  if (isVariableWidth) {
-    rowSizeOffset_ = offset;
-    offset += sizeof(uint32_t);
-  }
-
   if (hasProbedFlag) {
     nullOffsets_.push_back(nullOffset);
     probedFlagOffset_ = nullOffset + firstAggregateOffset * 8;
@@ -145,30 +188,30 @@ RowContainer::RowContainer(
   for (int32_t i = 0; i < nullOffsets_.size(); ++i) {
     nullOffsets_[i] += firstAggregateOffset * 8;
   }
-
-  // Fixup the offset of aggregates to make space for null flags.
   int32_t nullBytes = bits::nbytes(nullOffsets_.size());
-  if (rowSizeOffset_) {
-    rowSizeOffset_ += nullBytes;
+  offset += nullBytes;
+  for (const auto& accumulator : accumulators) {
+    // Accumulator offset must be aligned by their alignment size.
+    offset = bits::roundUp(offset, accumulator.alignment());
+    offsets_.push_back(offset);
+    offset += accumulator.fixedWidthSize();
   }
-  for (int32_t i = 0; i < aggregates_.size() + dependentTypes.size(); ++i) {
-    offsets_[i + firstAggregate] += nullBytes;
-    nullOffset = nullOffsets_[i + firstAggregate];
-    if (i < aggregates.size()) {
-      aggregates_[i]->setAllocator(&stringAllocator_);
-      aggregates_[i]->setOffsets(
-          offsets_[i + firstAggregate],
-          nullByte(nullOffset),
-          nullMask(nullOffset),
-          rowSizeOffset_);
-    }
+  for (auto& type : dependentTypes) {
+    offsets_.push_back(offset);
+    offset += typeKindSize(type->kind());
+  }
+  if (isVariableWidth) {
+    rowSizeOffset_ = offset;
+    offset += sizeof(uint32_t);
   }
   if (hasNext) {
-    nextOffset_ = offset + nullBytes;
+    nextOffset_ = offset;
     offset += sizeof(void*);
   }
-  fixedRowSize_ = offset + nullBytes;
-
+  fixedRowSize_ = bits::roundUp(offset, alignment_);
+  for (int i = 0; i < accumulators_.size(); ++i) {
+    nullOffset = nullOffsets_[i + firstAggregate];
+  }
   // A distinct hash table has no aggregates and if the hash table has
   // no nulls, it may be that there are no null flags.
   if (!nullOffsets_.empty()) {
@@ -177,11 +220,14 @@ RowContainer::RowContainer(
     initialNulls_.resize(nullBytes, 0x0);
     // Aggregates are null on a new row.
     auto aggregateNullOffset = nullableKeys ? keyTypes.size() : 0;
-    for (int32_t i = 0; i < aggregates_.size(); ++i) {
+    for (int32_t i = 0; i < accumulators_.size(); ++i) {
       bits::setBit(initialNulls_.data(), i + aggregateNullOffset);
     }
   }
-  normalizedKeySize_ = hasNormalizedKeys_ ? sizeof(normalized_key_t) : 0;
+  originalNormalizedKeySize_ = hasNormalizedKeys_
+      ? bits::roundUp(sizeof(normalized_key_t), alignment_)
+      : 0;
+  normalizedKeySize_ = originalNormalizedKeySize_;
   for (auto i = 0; i < offsets_.size(); ++i) {
     rowColumns_.emplace_back(
         offsets_[i],
@@ -201,7 +247,7 @@ char* RowContainer::newRow() {
     firstFreeRow_ = nextFree(row);
     --numFreeRows_;
   } else {
-    row = rows_.allocateFixed(fixedRowSize_ + normalizedKeySize_) +
+    row = rows_.allocateFixed(fixedRowSize_ + normalizedKeySize_, alignment_) +
         normalizedKeySize_;
     if (normalizedKeySize_) {
       ++numRowsWithNormalizedKey_;
@@ -226,6 +272,7 @@ char* RowContainer::initializeRow(char* row, bool reuse) {
   if (rowSizeOffset_) {
     variableRowSize(row) = 0;
   }
+  bits::clearBit(row, freeFlagOffset_);
   return row;
 }
 
@@ -293,8 +340,8 @@ void RowContainer::checkConsistency() {
 }
 
 void RowContainer::freeAggregates(folly::Range<char**> rows) {
-  for (auto& aggregate : aggregates_) {
-    aggregate->destroy(rows);
+  for (auto& accumulator : accumulators_) {
+    accumulator.destroy(rows);
   }
 }
 
@@ -313,7 +360,7 @@ void RowContainer::store(
         row,
         offsets_[column]);
   } else {
-    VELOX_DCHECK(column < keyTypes_.size() || aggregates_.empty());
+    VELOX_DCHECK(column < keyTypes_.size() || accumulators_.empty());
     auto rowColumn = rowColumns_[column];
     VELOX_DYNAMIC_TYPE_DISPATCH_ALL(
         storeWithNulls,
@@ -356,15 +403,12 @@ void RowContainer::extractString(
     values->set(index, value);
     return;
   }
-  BufferPtr buffer = values->getBufferWithSpace(value.size());
-  auto start = buffer->size();
-  buffer->setSize(start + value.size());
+  auto rawBuffer = values->getRawStringBufferWithSpace(value.size());
   ByteStream stream;
   HashStringAllocator::prepareRead(
       HashStringAllocator::headerOf(value.data()), stream);
-  stream.readBytes(buffer->asMutable<char>() + start, value.size());
-  values->setNoCopy(
-      index, StringView(buffer->as<char>() + start, value.size()));
+  stream.readBytes(rawBuffer, value.size());
+  values->setNoCopy(index, StringView(rawBuffer, value.size()));
 }
 
 void RowContainer::storeComplexType(
@@ -509,9 +553,7 @@ void RowContainer::clear() {
   stringAllocator_.clear();
   numRows_ = 0;
   numRowsWithNormalizedKey_ = 0;
-  if (hasNormalizedKeys_) {
-    normalizedKeySize_ = sizeof(normalized_key_t);
-  }
+  normalizedKeySize_ = originalNormalizedKeySize_;
   numFreeRows_ = 0;
   firstFreeRow_ = nullptr;
 }
@@ -528,7 +570,8 @@ void RowContainer::setProbedFlag(char** rows, int32_t numRows) {
 void RowContainer::extractProbedFlags(
     const char* FOLLY_NONNULL const* FOLLY_NONNULL rows,
     int32_t numRows,
-    bool replaceFalseWithNull,
+    bool setNullForNullKeysRow,
+    bool setNullForNonProbedRow,
     const VectorPtr& result) {
   result->resize(numRows);
   result->clearAllNulls();
@@ -536,23 +579,23 @@ void RowContainer::extractProbedFlags(
   auto* rawValues = flatResult->mutableRawValues<uint64_t>();
   for (auto i = 0; i < numRows; ++i) {
     // Check if this row has null keys.
-    bool hasNullKey = false;
-    if (nullableKeys_) {
+    bool nullResult = false;
+    if (setNullForNullKeysRow && nullableKeys_) {
       for (auto c = 0; c < keyTypes_.size(); ++c) {
         bool isNull =
             isNullAt(rows[i], columnAt(c).nullByte(), columnAt(c).nullMask());
         if (isNull) {
-          hasNullKey = true;
+          nullResult = true;
           break;
         }
       }
     }
 
-    if (hasNullKey) {
+    if (nullResult) {
       flatResult->setNull(i, true);
     } else {
       bool probed = bits::isBitSet(rows[i], probedFlagOffset_);
-      if (replaceFalseWithNull && !probed) {
+      if (setNullForNonProbedRow && !probed) {
         flatResult->setNull(i, true);
       } else {
         bits::setBit(rawValues, i, probed);
@@ -561,11 +604,24 @@ void RowContainer::extractProbedFlags(
   }
 }
 
+std::optional<int64_t> RowContainer::estimateRowSize() const {
+  if (numRows_ == 0) {
+    return std::nullopt;
+  }
+  int64_t freeBytes = rows_.availableInRun() + fixedRowSize_ * numFreeRows_;
+  int64_t usedSize = rows_.allocatedBytes() - freeBytes +
+      stringAllocator_.retainedSize() - stringAllocator_.freeSpace();
+  int64_t rowSize = usedSize / numRows_;
+  VELOX_CHECK_GT(
+      rowSize, 0, "Estimated row size of the RowContainer must be positive.");
+  return rowSize;
+}
+
 int64_t RowContainer::sizeIncrement(
     vector_size_t numRows,
     int64_t variableLengthBytes) const {
   constexpr int32_t kAllocUnit =
-      AllocationPool::kMinPages * memory::MappedMemory::kPageSize;
+      AllocationPool::kMinPages * memory::AllocationTraits::kPageSize;
   int32_t needRows = std::max<int64_t>(0, numRows - numFreeRows_);
   int64_t needBytes =
       std::min<int64_t>(0, variableLengthBytes - stringAllocator_.freeSpace());
@@ -574,12 +630,14 @@ int64_t RowContainer::sizeIncrement(
 }
 
 void RowContainer::skip(RowContainerIterator& iter, int32_t numRows) {
+  VELOX_DCHECK(accumulators_.empty(), "Used in join only");
   VELOX_DCHECK_LE(0, numRows);
   if (!iter.endOfRun) {
     // Set to first row.
     VELOX_DCHECK_EQ(0, iter.rowNumber);
     VELOX_DCHECK_EQ(0, iter.allocationIndex);
     iter.normalizedKeysLeft = numRowsWithNormalizedKey_;
+    iter.normalizedKeySize = originalNormalizedKeySize_;
     auto run = rows_.allocationAt(0)->runAt(0);
     iter.rowBegin = run.data<char>();
     iter.endOfRun = iter.rowBegin + run.numBytes();
@@ -590,7 +648,7 @@ void RowContainer::skip(RowContainerIterator& iter, int32_t numRows) {
     return;
   }
   int32_t rowSize = fixedRowSize_ +
-      (iter.normalizedKeysLeft > 0 ? sizeof(normalized_key_t) : 0);
+      (iter.normalizedKeysLeft > 0 ? originalNormalizedKeySize_ : 0);
   auto toSkip = numRows;
   if (iter.normalizedKeysLeft && iter.normalizedKeysLeft < numRows) {
     toSkip -= iter.normalizedKeysLeft;
@@ -630,8 +688,7 @@ void RowContainer::skip(RowContainerIterator& iter, int32_t numRows) {
 
 RowPartitions& RowContainer::partitions() {
   if (!partitions_) {
-    partitions_ =
-        std::make_unique<RowPartitions>(numRows_, *rows_.mappedMemory());
+    partitions_ = std::make_unique<RowPartitions>(numRows_, *rows_.pool());
   }
   return *partitions_;
 }
@@ -706,16 +763,12 @@ int32_t RowContainer::listPartitionRows(
   return numResults;
 }
 
-RowPartitions::RowPartitions(
-    int32_t numRows,
-    memory::MappedMemory& mappedMemory)
-    : capacity_(numRows), allocation_(&mappedMemory) {
-  auto numPages = bits::roundUp(capacity_, memory::MappedMemory::kPageSize) /
-      memory::MappedMemory::kPageSize;
-  if (!mappedMemory.allocate(numPages, 0, allocation_)) {
-    VELOX_FAIL(
-        "Failed to allocate RowContainer partitions: {} pages", numPages);
-  }
+RowPartitions::RowPartitions(int32_t numRows, memory::MemoryPool& pool)
+    : capacity_(numRows) {
+  auto numPages =
+      bits::roundUp(capacity_, memory::AllocationTraits::kPageSize) /
+      memory::AllocationTraits::kPageSize;
+  pool.allocateNonContiguous(numPages, allocation_);
 }
 
 void RowPartitions::appendPartitions(folly::Range<const uint8_t*> partitions) {
@@ -746,4 +799,53 @@ void RowPartitions::appendPartitions(folly::Range<const uint8_t*> partitions) {
   }
 }
 
+RowComparator::RowComparator(
+    const RowTypePtr& rowType,
+    const std::vector<core::FieldAccessTypedExprPtr>& sortingKeys,
+    const std::vector<core::SortOrder>& sortingOrders,
+    RowContainer* rowContainer)
+    : rowContainer_(rowContainer) {
+  const auto numKeys = sortingKeys.size();
+  for (auto i = 0; i < numKeys; ++i) {
+    const auto channel = exprToChannel(sortingKeys[i].get(), rowType);
+    VELOX_USER_CHECK_NE(
+        channel,
+        kConstantChannel,
+        "RowComparator doesn't allow constant comparison keys");
+    keyInfo_.push_back(std::make_pair(channel, sortingOrders[i]));
+  }
+}
+
+bool RowComparator::operator()(const char* lhs, const char* rhs) {
+  if (lhs == rhs) {
+    return false;
+  }
+  for (auto& key : keyInfo_) {
+    if (auto result = rowContainer_->compare(
+            lhs,
+            rhs,
+            key.first,
+            {key.second.isNullsFirst(), key.second.isAscending(), false})) {
+      return result < 0;
+    }
+  }
+  return false;
+}
+
+bool RowComparator::operator()(
+    const std::vector<DecodedVector>& decodedVectors,
+    vector_size_t index,
+    const char* rhs) {
+  for (auto& key : keyInfo_) {
+    if (auto result = rowContainer_->compare(
+            rhs,
+            rowContainer_->columnAt(key.first),
+            decodedVectors[key.first],
+            index,
+            {key.second.isNullsFirst(), key.second.isAscending(), false})) {
+      return result > 0;
+    }
+  }
+  return false;
+}
 } // namespace facebook::velox::exec

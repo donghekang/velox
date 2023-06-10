@@ -106,7 +106,7 @@ class Spiller {
     int32_t testSpillPct;
   };
 
-  using SpillRows = std::vector<char*, memory::StlMappedMemoryAllocator<char*>>;
+  using SpillRows = std::vector<char*, memory::StlAllocator<char*>>;
 
   // The constructor without specifying hash bits which will only use one
   // partition by default. It is only used by kOrderBy spiller type as for now.
@@ -165,7 +165,9 @@ class Spiller {
   /// after that, for those spilled partitions, the spilling operator will
   /// append new incoming vector to the spill file directly without buffering in
   /// row container anymore.
-  void spill(const SpillPartitionNumSet& partitions);
+  ///
+  /// NOTE: if 'partitions' is empty, then spill from all the partitions.
+  void spill(const SpillPartitionNumSet& partitions = {});
 
   /// Append 'spillVector' into the spill file of given 'partition'. It is now
   /// only used by the spilling operator which doesn't need data sort, such as
@@ -260,14 +262,17 @@ class Spiller {
     /// NOTE: when we sum up the stats from a group of spill operators, it is
     /// the total number of spilled partitions X number of operators.
     uint32_t spilledPartitions{0};
+    uint64_t spilledFiles{0};
 
     Stats(
         uint64_t _spilledBytes,
         uint64_t _spilledRows,
-        uint32_t _spilledPartitions)
+        uint32_t _spilledPartitions,
+        uint64_t _spilledFiles)
         : spilledBytes(_spilledBytes),
           spilledRows(_spilledRows),
-          spilledPartitions(_spilledPartitions) {}
+          spilledPartitions(_spilledPartitions),
+          spilledFiles(_spilledFiles) {}
 
     Stats() = default;
 
@@ -275,23 +280,28 @@ class Spiller {
       spilledBytes += other.spilledBytes;
       spilledRows += other.spilledRows;
       spilledPartitions += other.spilledPartitions;
+      spilledFiles += other.spilledFiles;
       return *this;
     }
   };
 
   Stats stats() const {
     return Stats{
-        state_.spilledBytes(), spilledRows_, state_.spilledPartitions()};
+        state_.spilledBytes(),
+        spilledRows_,
+        state_.spilledPartitions(),
+        spilledFiles()};
   }
 
-  int64_t spilledFiles() const {
+  /// Return the number of spilled files we have.
+  uint64_t spilledFiles() const {
     return state_.spilledFiles();
   }
 
-  // Returns the MappedMemory to use for intermediate storage for
+  // Returns the MemoryAllocator to use for intermediate storage for
   // spilling. This is not directly the RowContainer's memory because
   // this is usually at limit when starting spilling.
-  static memory::MappedMemory& spillMappedMemory();
+  static memory::MemoryAllocator& allocator();
 
   // Global memory pool for spill intermediates. ~1MB per spill executor thread
   // is the expected peak utilization.
@@ -318,8 +328,8 @@ class Spiller {
   // goes empty this is refilled from the RowContainer for the next
   // spill run from the same partition.
   struct SpillRun {
-    explicit SpillRun(memory::MappedMemory& mappedMemory)
-        : rows(0, memory::StlMappedMemoryAllocator<char*>(&mappedMemory)) {}
+    explicit SpillRun(memory::MemoryPool& pool)
+        : rows(0, memory::StlAllocator<char*>(pool)) {}
     // Spillable rows from the RowContainer.
     SpillRows rows;
     // The total byte size of rows referenced from 'rows'.
@@ -392,9 +402,6 @@ class Spiller {
   // based on the spiller type. As for now, we need to sort spill data for any
   // non hash join types of spilling.
   bool needSort() const;
-
-  // Invoked when finish spill
-  void recordStats();
 
   const Type type_;
   // NOTE: for hash join probe type, there is no associated row container for

@@ -38,17 +38,20 @@ add_library(
   InputStream.cpp
   IntDecoder.cpp
   IoStatistics.cpp
-  MemoryInputStream.cpp
+  MetadataFilter.cpp
   Options.cpp
   Range.cpp
   ReaderFactory.cpp
   ScanSpec.cpp
   ColumnLoader.cpp
+  SelectiveByteRleColumnReader.cpp
   SelectiveColumnReader.cpp
   SelectiveRepeatedColumnReader.cpp
   SelectiveStructColumnReader.cpp
   SeekableInputStream.cpp
-  TypeWithId.cpp)
+  TypeUtils.cpp
+  TypeWithId.cpp
+  WriterFactory.cpp)
 
 target_link_libraries(
   velox_dwio_common
@@ -58,7 +61,8 @@ target_link_libraries(
   velox_dwio_common_encryption
   velox_dwio_common_exception
   velox_exception
+  velox_expression
   velox_memory
   Boost::regex
-  ${FOLLY_WITH_DEPENDENCIES}
+  Folly::folly
   glog::glog)

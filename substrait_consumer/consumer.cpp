@@ -117,7 +117,7 @@ int main(int argc, char** argv) {
   }
 
   folly::init(&argc, &argv);
-  auto pool = memory::getDefaultMemoryPool();
+  auto pool = memory::addDefaultLeafMemoryPool();
   registerConnector();
   registerFunctions();
 

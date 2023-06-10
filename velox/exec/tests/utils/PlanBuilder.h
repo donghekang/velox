@@ -19,7 +19,6 @@
 #include <velox/core/PlanFragment.h>
 #include <velox/core/PlanNode.h>
 #include "velox/common/memory/Memory.h"
-#include "velox/connectors/WriteProtocol.h"
 #include "velox/parse/ExpressionsParser.h"
 #include "velox/parse/PlanNodeIdGenerator.h"
 
@@ -163,9 +162,15 @@ class PlanBuilder {
   /// @param parallelizable If true, ValuesNode can run multi-threaded, in which
   /// case it will produce duplicate data from each thread, e.g. each thread
   /// will return all the data in 'values'. Useful for testing.
+  /// @param repeatTimes The number of times data is produced as input. If
+  /// greater than one, each RowVector will produce data as input `repeatTimes`.
+  /// For example, in case `values` has 3 vectors {v1, v2, v3} and repeatTimes
+  /// is 2, the input produced will be {v1, v2, v3, v1, v2, v3}. Useful for
+  /// testing.
   PlanBuilder& values(
       const std::vector<RowVectorPtr>& values,
-      bool parallelizable = false);
+      bool parallelizable = false,
+      size_t repeatTimes = 1);
 
   /// Add an ExchangeNode.
   ///
@@ -235,22 +240,22 @@ class PlanBuilder {
       const RowTypePtr& inputColumns,
       const std::vector<std::string>& tableColumnNames,
       const std::shared_ptr<core::InsertTableHandle>& insertHandle,
-      connector::WriteProtocol::CommitStrategy commitStrategy =
-          connector::WriteProtocol::CommitStrategy::kNoCommit,
+      connector::CommitStrategy commitStrategy =
+          connector::CommitStrategy::kNoCommit,
       const std::string& rowCountColumnName = "rowCount");
 
-  /// Add a TableWriteNode assuming that input columns names match column names
-  /// in the target table.
+  /// Add a TableWriteNode assuming that input columns match the source node
+  /// columns in order.
   ///
-  /// @param columnNames A subset of input columns to write.
+  /// @param tableColumnNames Column names in the target table.
   /// @param insertHandle Connector-specific table handle.
   /// @param rowCountColumnName The name of the output column containing the
   /// number of rows written.
   PlanBuilder& tableWrite(
-      const std::vector<std::string>& columnNames,
+      const std::vector<std::string>& tableColumnNames,
       const std::shared_ptr<core::InsertTableHandle>& insertHandle,
-      connector::WriteProtocol::CommitStrategy commitStrategy =
-          connector::WriteProtocol::CommitStrategy::kNoCommit,
+      connector::CommitStrategy commitStrategy =
+          connector::CommitStrategy::kNoCommit,
       const std::string& rowCountColumnName = "rowCount");
 
   /// Add an AggregationNode representing partial aggregation with the
@@ -530,6 +535,14 @@ class PlanBuilder {
       int numPartitions,
       const std::vector<std::string>& outputLayout = {});
 
+  /// Same as above, but allows to provide custom partition function.
+  PlanBuilder& partitionedOutput(
+      const std::vector<std::string>& keys,
+      int numPartitions,
+      bool replicateNullsAndAny,
+      core::PartitionFunctionSpecPtr partitionFunctionSpec,
+      const std::vector<std::string>& outputLayout = {});
+
   /// Add a PartitionedOutputNode to broadcast the input data.
   ///
   /// @param outputLayout Optional output layout in case it is different then
@@ -581,13 +594,16 @@ class PlanBuilder {
   /// @param outputLayout Output layout consisting of columns from probe and
   /// build sides.
   /// @param joinType Type of the join: inner, left, right, full, semi, or anti.
+  /// @param nullAware Applies to semi and anti joins. Indicates whether the
+  /// join follows IN (null-aware) or EXISTS (regular) semantic.
   PlanBuilder& hashJoin(
       const std::vector<std::string>& leftKeys,
       const std::vector<std::string>& rightKeys,
       const core::PlanNodePtr& build,
       const std::string& filter,
       const std::vector<std::string>& outputLayout,
-      core::JoinType joinType = core::JoinType::kInner);
+      core::JoinType joinType = core::JoinType::kInner,
+      bool nullAware = false);
 
   /// Add a MergeJoinNode to join two inputs using one or more join keys and an
   /// optional filter. The caller is responsible to ensure that inputs are
@@ -603,15 +619,32 @@ class PlanBuilder {
       const std::vector<std::string>& outputLayout,
       core::JoinType joinType = core::JoinType::kInner);
 
-  /// Add a CrossJoinNode to produce a cross product of the inputs. First input
-  /// comes from the preceding plan node. Second input is specified in 'right'
-  /// parameter.
+  /// Add a NestedLoopJoinNode to join two inputs using filter as join
+  /// condition to perform equal/non-equal join. Only supports inner/outer
+  /// joins.
+  ///
+  /// @param right Right-side input. Typically, to reduce memory usage, the
+  /// smaller input is placed on the right-side.
+  /// @param joinCondition SQL expression as the join condition. Can
+  /// use columns from both probe and build sides of the join.
+  /// @param outputLayout Output layout consisting of columns from probe and
+  /// build sides.
+  /// @param joinType Type of the join: inner, left, right, full.
+  PlanBuilder& nestedLoopJoin(
+      const core::PlanNodePtr& right,
+      const std::string& joinCondition,
+      const std::vector<std::string>& outputLayout,
+      core::JoinType joinType = core::JoinType::kInner);
+
+  /// Add a NestedLoopJoinNode to produce a cross product of the inputs. First
+  /// input comes from the preceding plan node. Second input is specified in
+  /// 'right' parameter.
   ///
   /// @param right Right-side input. Typically, to reduce memory usage, the
   /// smaller input is placed on the right-side.
   /// @param outputLayout Output layout consisting of columns from left and
   /// right sides.
-  PlanBuilder& crossJoin(
+  PlanBuilder& nestedLoopJoin(
       const core::PlanNodePtr& right,
       const std::vector<std::string>& outputLayout);
 
@@ -659,6 +692,27 @@ class PlanBuilder {
   /// "row_number() over (partition by a order by b
   ///  rows between a + 10 preceding and 10 following)"
   PlanBuilder& window(const std::vector<std::string>& windowFunctions);
+
+  /// Add a RowNumberNode to compute single row_number window function with an
+  /// optional limit and no sorting.
+  PlanBuilder& rowNumber(
+      const std::vector<std::string>& partitionKeys,
+      std::optional<int32_t> limit = std::nullopt);
+
+  /// Add a TopNRowNumberNode to compute single row_number window function with
+  /// a limit applied to sorted partitions.
+  PlanBuilder& topNRowNumber(
+      const std::vector<std::string>& partitionKeys,
+      const std::vector<std::string>& sortingKeys,
+      int32_t limit,
+      bool generateRowNumber);
+
+  /// Add a MarkDistinctNode to compute aggregate mask channel
+  /// @param markerKey Name of output mask channel
+  /// @param distinctKeys List of columns to be marked distinct.
+  PlanBuilder& markDistinct(
+      std::string markerKey,
+      const std::vector<std::string>& distinctKeys);
 
   /// Stores the latest plan node ID into the specified variable. Useful for
   /// capturing IDs of the leaf plan nodes (table scans, exchanges, etc.) to use

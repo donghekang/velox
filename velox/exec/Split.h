@@ -23,7 +23,7 @@ struct Split {
   std::shared_ptr<velox::connector::ConnectorSplit> connectorSplit;
   int32_t groupId{-1}; // Bucketed group id (-1 means 'none').
 
-  Split() {}
+  Split() = default;
 
   explicit Split(
       std::shared_ptr<velox::connector::ConnectorSplit>&& connectorSplit,
@@ -57,7 +57,7 @@ struct Split {
 
   std::string toString() const {
     return fmt::format(
-        "[split: [{}] {}]",
+        "Split: [{}] {}",
         hasConnectorSplit() ? connectorSplit->toString() : "NULL",
         groupId);
   }

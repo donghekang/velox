@@ -39,6 +39,13 @@ class AssertQueryBuilder {
   /// properties.
   AssertQueryBuilder& config(const std::string& key, const std::string& value);
 
+  /// Set connector-specific configuration property. May be called multiple
+  /// times to set multiple properties for one or multiple connectors.
+  AssertQueryBuilder& connectorConfig(
+      const std::string& connectorId,
+      const std::string& key,
+      const std::string& value);
+
   // Methods to add splits.
 
   /// Add a single split for the specified plan node.
@@ -84,6 +91,14 @@ class AssertQueryBuilder {
     params_.queryCtx = ctx;
     return *this;
   }
+
+  /// Spilling directory, if not empty, then the task's spilling directory would
+  /// be built from it.
+  AssertQueryBuilder& spillDirectory(const std::string& dir) {
+    params_.spillDirectory = dir;
+    return *this;
+  }
+
   // Methods to run the query and verify the results.
 
   /// Run the query and verify results against DuckDB. Requires
@@ -98,6 +113,15 @@ class AssertQueryBuilder {
   /// Run the query and compare results with 'expected'.
   std::shared_ptr<Task> assertResults(
       const std::vector<RowVectorPtr>& expected);
+
+  /// Run the query and test that it returns no results (empty result set).
+  std::shared_ptr<Task> assertEmptyResults();
+
+  /// Run the query and ensure it returns batches of `expectedType`, and exactly
+  /// `numRows`.
+  std::shared_ptr<Task> assertTypeAndNumRows(
+      const TypePtr& expectedType,
+      vector_size_t expectedNumRows);
 
   /// Run the query and collect all results into a single vector. Throws if
   /// query returns empty result.
@@ -115,6 +139,9 @@ class AssertQueryBuilder {
   DuckDbQueryRunner* FOLLY_NULLABLE const duckDbQueryRunner_;
   CursorParameters params_;
   std::unordered_map<std::string, std::string> configs_;
+  std::unordered_map<std::string, std::unordered_map<std::string, std::string>>
+      connectorConfigs_;
   std::unordered_map<core::PlanNodeId, std::vector<Split>> splits_;
 };
+
 } // namespace facebook::velox::exec::test

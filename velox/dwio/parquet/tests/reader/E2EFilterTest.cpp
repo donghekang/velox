@@ -25,14 +25,12 @@ using namespace facebook::velox::common;
 using namespace facebook::velox::dwio::common;
 using namespace facebook::velox::parquet;
 
-using dwio::common::MemoryInputStream;
 using dwio::common::MemorySink;
 
 class E2EFilterTest : public E2EFilterTestBase {
  protected:
   void SetUp() override {
     E2EFilterTestBase::SetUp();
-    writerProperties_ = ::parquet::WriterProperties::Builder().build();
   }
 
   void testWithTypes(
@@ -41,14 +39,16 @@ class E2EFilterTest : public E2EFilterTestBase {
       bool wrapInStruct,
       const std::vector<std::string>& filterable,
       int32_t numCombinations) {
-    testSenario(columns, customize, wrapInStruct, filterable, numCombinations);
+    testScenario(columns, customize, wrapInStruct, filterable, numCombinations);
 
     // Always test no null case.
     auto newCustomize = [&]() {
-      customize();
+      if (customize) {
+        customize();
+      }
       makeNotNull(0);
     };
-    testSenario(
+    testScenario(
         columns, newCustomize, wrapInStruct, filterable, numCombinations);
   }
 
@@ -56,11 +56,13 @@ class E2EFilterTest : public E2EFilterTestBase {
       const TypePtr&,
       const std::vector<RowVectorPtr>& batches,
       bool /*forRowGroupSkip*/) override {
-    auto sink = std::make_unique<MemorySink>(*pool_, 200 * 1024 * 1024);
+    auto sink = std::make_unique<MemorySink>(*leafPool_, 200 * 1024 * 1024);
     sinkPtr_ = sink.get();
+    options_.memoryPool = rootPool_.get();
 
+    options_.bufferGrowRatio = 2;
     writer_ = std::make_unique<facebook::velox::parquet::Writer>(
-        std::move(sink), *pool_, rowGroupSize_, writerProperties_);
+        std::move(sink), options_);
     for (auto& batch : batches) {
       writer_->write(batch);
     }
@@ -69,20 +71,19 @@ class E2EFilterTest : public E2EFilterTestBase {
 
   std::unique_ptr<dwio::common::Reader> makeReader(
       const dwio::common::ReaderOptions& opts,
-      std::unique_ptr<dwio::common::InputStream> input) override {
+      std::unique_ptr<dwio::common::BufferedInput> input) override {
     return std::make_unique<ParquetReader>(std::move(input), opts);
   }
 
   std::unique_ptr<facebook::velox::parquet::Writer> writer_;
-  std::shared_ptr<::parquet::WriterProperties> writerProperties_;
-  int32_t rowGroupSize_{10000};
+  facebook::velox::parquet::WriterOptions options_;
 };
 
 TEST_F(E2EFilterTest, writerMagic) {
   rowType_ = ROW({INTEGER()});
   std::vector<RowVectorPtr> batches;
   batches.push_back(std::static_pointer_cast<RowVector>(
-      test::BatchMaker::createBatch(rowType_, 20000, *pool_, nullptr, 0)));
+      test::BatchMaker::createBatch(rowType_, 20000, *leafPool_, nullptr, 0)));
   writeToMemory(rowType_, batches, false);
   auto data = sinkPtr_->getData();
   auto size = sinkPtr_->size();
@@ -90,36 +91,42 @@ TEST_F(E2EFilterTest, writerMagic) {
   EXPECT_EQ("PAR1", std::string(data + size - 4, 4));
 }
 
+TEST_F(E2EFilterTest, boolean) {
+  testWithTypes(
+      "boolean_val:boolean,"
+      "boolean_null:boolean",
+      [&]() { makeAllNulls("boolean_null"); },
+      true,
+      {"boolean_val"},
+      20);
+}
+
 TEST_F(E2EFilterTest, integerDirect) {
-  writerProperties_ = ::parquet::WriterProperties::Builder()
-                          .disable_dictionary()
-                          ->data_pagesize(4 * 1024)
-                          ->build();
+  options_.enableDictionary = false;
+  options_.dataPageSize = 4 * 1024;
+
   testWithTypes(
       "short_val:smallint,"
       "int_val:int,"
       "long_val:bigint,"
       "long_null:bigint",
       [&]() { makeAllNulls("long_null"); },
-      false,
+      true,
       {"short_val", "int_val", "long_val"},
       20);
 }
-
-TEST_F(E2EFilterTest, integerDictionary) {
+TEST_F(E2EFilterTest, compression) {
   for (const auto compression :
-       {::parquet::Compression::SNAPPY,
-        ::parquet::Compression::ZSTD,
-        ::parquet::Compression::GZIP,
-        ::parquet::Compression::UNCOMPRESSED}) {
-    if (!arrow::util::Codec::IsAvailable(compression)) {
+       {dwio::common::CompressionKind_SNAPPY,
+        dwio::common::CompressionKind_ZSTD,
+        dwio::common::CompressionKind_GZIP,
+        dwio::common::CompressionKind_NONE}) {
+    if (!facebook::velox::parquet::Writer::isArrowCodecAvailable(compression)) {
       continue;
     }
 
-    writerProperties_ = ::parquet::WriterProperties::Builder()
-                            .data_pagesize(4 * 1024)
-                            ->compression(compression)
-                            ->build();
+    options_.dataPageSize = 4 * 1024;
+    options_.compression = compression;
 
     testWithTypes(
         "short_val:smallint,"
@@ -156,17 +163,58 @@ TEST_F(E2EFilterTest, integerDictionary) {
               30000, // rareMax
               true); // keepNulls
         },
-        false,
+        true,
         {"short_val", "int_val", "long_val"},
-        20);
+        3);
   }
 }
 
+TEST_F(E2EFilterTest, integerDictionary) {
+  options_.dataPageSize = 4 * 1024;
+
+  testWithTypes(
+      "short_val:smallint,"
+      "int_val:int,"
+      "long_val:bigint",
+      [&]() {
+        makeIntDistribution<int64_t>(
+            "long_val",
+            10, // min
+            100, // max
+            22, // repeats
+            19, // rareFrequency
+            -9999, // rareMin
+            10000000000, // rareMax
+            true); // keepNulls
+
+        makeIntDistribution<int32_t>(
+            "int_val",
+            10, // min
+            100, // max
+            22, // repeats
+            19, // rareFrequency
+            -9999, // rareMin
+            100000000, // rareMax
+            false); // keepNulls
+
+        makeIntDistribution<int16_t>(
+            "short_val",
+            10, // min
+            100, // max
+            22, // repeats
+            19, // rareFrequency
+            -999, // rareMin
+            30000, // rareMax
+            true); // keepNulls
+      },
+      true,
+      {"short_val", "int_val", "long_val"},
+      20);
+}
+
 TEST_F(E2EFilterTest, floatAndDoubleDirect) {
-  writerProperties_ = ::parquet::WriterProperties::Builder()
-                          .disable_dictionary()
-                          ->data_pagesize(4 * 1024)
-                          ->build();
+  options_.enableDictionary = false;
+  options_.dataPageSize = 4 * 1024;
 
   testWithTypes(
       "float_val:float,"
@@ -180,7 +228,7 @@ TEST_F(E2EFilterTest, floatAndDoubleDirect) {
         makeQuantizedFloat<float>("float_val2", 200, true);
         makeQuantizedFloat<double>("double_val2", 522, true);
       },
-      false,
+      true,
       {"float_val", "double_val", "float_val2", "double_val2", "float_null"},
       20);
 }
@@ -205,7 +253,7 @@ TEST_F(E2EFilterTest, floatAndDouble) {
         makeReapeatingValues<float>("float_val2", 0, 100, 200, 10.1);
         makeReapeatingValues<double>("double_val2", 0, 100, 200, 100.8);
       },
-      false,
+      true,
       {"float_val", "double_val", "float_val2", "double_val2", "float_null"},
       20);
 }
@@ -220,14 +268,14 @@ TEST_F(E2EFilterTest, shortDecimalDictionary) {
     testWithTypes(
         type,
         [&]() {
-          makeIntDistribution<UnscaledShortDecimal>(
+          makeIntDistribution<int64_t>(
               "shortdecimal_val",
-              UnscaledShortDecimal(10), // min
-              UnscaledShortDecimal(100), // max
+              10, // min
+              100, // max
               22, // repeats
               19, // rareFrequency
-              UnscaledShortDecimal(-999), // rareMin
-              UnscaledShortDecimal(30000), // rareMax
+              -999, // rareMin
+              30000, // rareMax
               true);
         },
         false,
@@ -237,10 +285,9 @@ TEST_F(E2EFilterTest, shortDecimalDictionary) {
 }
 
 TEST_F(E2EFilterTest, shortDecimalDirect) {
-  writerProperties_ = ::parquet::WriterProperties::Builder()
-                          .disable_dictionary()
-                          ->data_pagesize(4 * 1024)
-                          ->build();
+  options_.enableDictionary = false;
+  options_.dataPageSize = 4 * 1024;
+
   // decimal(10, 5) maps to 5 bytes FLBA in Parquet.
   // decimal(17, 5) maps to 8 bytes FLBA in Parquet.
   for (const auto& type : {
@@ -250,14 +297,14 @@ TEST_F(E2EFilterTest, shortDecimalDirect) {
     testWithTypes(
         type,
         [&]() {
-          makeIntDistribution<UnscaledShortDecimal>(
+          makeIntDistribution<int64_t>(
               "shortdecimal_val",
-              UnscaledShortDecimal(10), // min
-              UnscaledShortDecimal(100), // max
+              10, // min
+              100, // max
               22, // repeats
               19, // rareFrequency
-              UnscaledShortDecimal(-999), // rareMin
-              UnscaledShortDecimal(30000), // rareMax
+              -999, // rareMin
+              30000, // rareMax
               true);
         },
         false,
@@ -268,10 +315,7 @@ TEST_F(E2EFilterTest, shortDecimalDirect) {
   testWithTypes(
       "shortdecimal_val:decimal(10, 5)",
       [&]() {
-        useSuppliedValues<UnscaledShortDecimal>(
-            "shortdecimal_val",
-            0,
-            {UnscaledShortDecimal(-479), UnscaledShortDecimal(40000000)});
+        useSuppliedValues<int64_t>("shortdecimal_val", 0, {-479, 40000000});
       },
       false,
       {"shortdecimal_val"},
@@ -288,27 +332,26 @@ TEST_F(E2EFilterTest, longDecimalDictionary) {
     testWithTypes(
         type,
         [&]() {
-          makeIntDistribution<UnscaledLongDecimal>(
+          makeIntDistribution<int128_t>(
               "longdecimal_val",
-              UnscaledLongDecimal(10), // min
-              UnscaledLongDecimal(100), // max
+              10, // min
+              100, // max
               22, // repeats
               19, // rareFrequency
-              UnscaledLongDecimal(-999), // rareMin
-              UnscaledLongDecimal(30000), // rareMax
+              -999, // rareMin
+              30000, // rareMax
               true);
         },
-        false,
+        true,
         {},
         20);
   }
 }
 
 TEST_F(E2EFilterTest, longDecimalDirect) {
-  writerProperties_ = ::parquet::WriterProperties::Builder()
-                          .disable_dictionary()
-                          ->data_pagesize(4 * 1024)
-                          ->build();
+  options_.enableDictionary = false;
+  options_.dataPageSize = 4 * 1024;
+
   // decimal(30, 10) maps to 13 bytes FLBA in Parquet.
   // decimal(37, 15) maps to 16 bytes FLBA in Parquet.
   for (const auto& type : {
@@ -318,17 +361,17 @@ TEST_F(E2EFilterTest, longDecimalDirect) {
     testWithTypes(
         type,
         [&]() {
-          makeIntDistribution<UnscaledLongDecimal>(
+          makeIntDistribution<int128_t>(
               "longdecimal_val",
-              UnscaledLongDecimal(10), // min
-              UnscaledLongDecimal(100), // max
+              10, // min
+              100, // max
               22, // repeats
               19, // rareFrequency
-              UnscaledLongDecimal(-999), // rareMin
-              UnscaledLongDecimal(30000), // rareMax
+              -999, // rareMin
+              30000, // rareMax
               true);
         },
-        false,
+        true,
         {},
         20);
   }
@@ -336,11 +379,10 @@ TEST_F(E2EFilterTest, longDecimalDirect) {
   testWithTypes(
       "longdecimal_val:decimal(30, 10)",
       [&]() {
-        useSuppliedValues<UnscaledLongDecimal>(
+        useSuppliedValues<int128_t>(
             "longdecimal_val",
             0,
-            {UnscaledLongDecimal(-479),
-             UnscaledLongDecimal(buildInt128(1546093991, 4054979645))});
+            {-479, HugeInt::build(1546093991, 4054979645)});
       },
       false,
       {},
@@ -348,10 +390,8 @@ TEST_F(E2EFilterTest, longDecimalDirect) {
 }
 
 TEST_F(E2EFilterTest, stringDirect) {
-  writerProperties_ = ::parquet::WriterProperties::Builder()
-                          .disable_dictionary()
-                          ->data_pagesize(4 * 1024)
-                          ->build();
+  options_.enableDictionary = false;
+  options_.dataPageSize = 4 * 1024;
 
   testWithTypes(
       "string_val:string,"
@@ -360,7 +400,7 @@ TEST_F(E2EFilterTest, stringDirect) {
         makeStringUnique("string_val");
         makeStringUnique("string_val_2");
       },
-      false,
+      true,
       {"string_val", "string_val_2"},
       20);
 }
@@ -375,16 +415,14 @@ TEST_F(E2EFilterTest, stringDictionary) {
         makeStringDistribution("string_val_2", 170, false, true);
         makeStringDistribution("string_const", 1, true, false);
       },
-      false,
+      true,
       {"string_val", "string_val_2"},
       20);
 }
 
 TEST_F(E2EFilterTest, dedictionarize) {
-  writerProperties_ = ::parquet::WriterProperties::Builder()
-                          .max_row_group_length(10000000)
-                          ->dictionary_pagesize_limit(20000)
-                          ->build();
+  options_.maxRowGroupLength = 10'000'000;
+  options_.dictionaryPageSizeLimit = 20'000;
 
   testWithTypes(
       "long_val: bigint,"
@@ -394,8 +432,139 @@ TEST_F(E2EFilterTest, dedictionarize) {
         makeStringDistribution("string_val", 10000000, true, false);
         makeStringDistribution("string_val_2", 1700000, false, true);
       },
-      false,
+      true,
       {"long_val", "string_val", "string_val_2"},
+      20);
+}
+
+TEST_F(E2EFilterTest, filterStruct) {
+  // The data has a struct member with one second level struct
+  // column. Both structs have a column that gets filtered 'nestedxxx'
+  // and one that does not 'dataxxx'.
+  testWithTypes(
+      "long_val:bigint,"
+      "outer_struct: struct<nested1:bigint, "
+      "  data1: string, "
+      "  inner_struct: struct<nested2: bigint, data2: array<smallint>>>",
+      [&]() {},
+      false,
+      {"long_val",
+       "outer_struct.inner_struct",
+       "outer_struct.nested1",
+       "outer_struct.inner_struct.nested2"},
+      40);
+}
+
+TEST_F(E2EFilterTest, list) {
+  // Break up the leaf data in small pages to cover coalescing repdefs.
+  options_.dataPageSize = 4 * 1024;
+
+  batchCount_ = 2;
+  batchSize_ = 12000;
+  testWithTypes(
+      "long_val:bigint, array_val:array<int>,"
+      "struct_array: struct<a: array<struct<k:int, v:int, va: array<smallint>>>>",
+      nullptr,
+      false,
+      {"long_val", "array_val"},
+      10);
+}
+
+TEST_F(E2EFilterTest, metadataFilter) {
+  testMetadataFilter();
+}
+
+TEST_F(E2EFilterTest, subfieldsPruning) {
+  testSubfieldsPruning();
+}
+
+TEST_F(E2EFilterTest, mutationCornerCases) {
+  testMutationCornerCases();
+}
+
+TEST_F(E2EFilterTest, map) {
+  // Break up the leaf data in small pages to cover coalescing repdefs.
+  options_.dataPageSize = 4 * 1024;
+
+  batchCount_ = 2;
+  batchSize_ = 12000;
+  testWithTypes(
+      "long_val:bigint,"
+      "map_val:map<int, int>,"
+      "nested_map:map<int, map<int, bigint>>,"
+      "struct_map: struct<m: map<int, struct<k:int, v:int, vm: map<bigint, smallint>>>>",
+      nullptr,
+      false,
+      {"long_val", "map_val"},
+      10);
+}
+
+TEST_F(E2EFilterTest, varbinaryDirect) {
+  options_.enableDictionary = false;
+  options_.dataPageSize = 4 * 1024;
+
+  testWithTypes(
+      "varbinary_val:varbinary,"
+      "varbinary_val_2:varbinary",
+      [&]() {
+        makeStringUnique("varbinary_val");
+        makeStringUnique("varbinary_val_2");
+      },
+      true,
+      {"varbinary_val", "varbinary_val_2"},
+      20);
+}
+
+TEST_F(E2EFilterTest, varbinaryDictionary) {
+  testWithTypes(
+      "varbinary_val:varbinary,"
+      "varbinary_val_2:varbinary,"
+      "varbinary_const:varbinary",
+      [&]() {
+        makeStringDistribution("varbinary_val", 100, true, false);
+        makeStringDistribution("varbinary_val_2", 170, false, true);
+        makeStringDistribution("varbinary_const", 1, true, false);
+      },
+      true,
+      {"varbinary_val", "varbinary_val_2"},
+      20);
+}
+
+TEST_F(E2EFilterTest, largeMetadata) {
+  options_.maxRowGroupLength = 1;
+
+  rowType_ = ROW({INTEGER()});
+  std::vector<RowVectorPtr> batches;
+  batches.push_back(std::static_pointer_cast<RowVector>(
+      test::BatchMaker::createBatch(rowType_, 1000, *leafPool_, nullptr, 0)));
+  writeToMemory(rowType_, batches, false);
+  dwio::common::ReaderOptions readerOpts{leafPool_.get()};
+  readerOpts.setDirectorySizeGuess(1024);
+  readerOpts.setFilePreloadThreshold(1024 * 8);
+  dwio::common::RowReaderOptions rowReaderOpts;
+  std::string_view data(sinkPtr_->getData(), sinkPtr_->size());
+  auto input = std::make_unique<BufferedInput>(
+      std::make_shared<InMemoryReadFile>(data), readerOpts.getMemoryPool());
+  auto reader = makeReader(readerOpts, std::move(input));
+  EXPECT_EQ(1000, reader->numberOfRows());
+}
+
+TEST_F(E2EFilterTest, date) {
+  testWithTypes(
+      "date_val:date",
+      [&]() {
+        makeIntDistribution<Date>(
+            "date_val",
+            10, // min
+            100, // max
+            22, // repeats
+            19, // rareFrequency
+            -999, // rareMin
+            30000, // rareMax
+            true); // keepNulls
+      },
+      false,
+      {"date_val"},
       20);
 }
 

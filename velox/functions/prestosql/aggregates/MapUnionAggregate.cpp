@@ -42,7 +42,7 @@ class MapUnionAggregate : public aggregate::MapAggregateBase {
   }
 };
 
-bool registerMapUnionAggregate(const std::string& name) {
+exec::AggregateRegistrationResult registerMapUnion(const std::string& name) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures{
       exec::AggregateFunctionSignatureBuilder()
           .knownTypeVariable("K")
@@ -52,7 +52,7 @@ bool registerMapUnionAggregate(const std::string& name) {
           .argumentType("map(K,V)")
           .build()};
 
-  exec::registerAggregateFunction(
+  return exec::registerAggregateFunction(
       name,
       std::move(signatures),
       [name](
@@ -66,13 +66,12 @@ bool registerMapUnionAggregate(const std::string& name) {
             name);
         return std::make_unique<MapUnionAggregate>(resultType);
       });
-  return true;
 }
 
 } // namespace
 
-void registerMapUnionAggregate() {
-  registerMapUnionAggregate(kMapUnion);
+void registerMapUnionAggregate(const std::string& prefix) {
+  registerMapUnion(prefix + kMapUnion);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

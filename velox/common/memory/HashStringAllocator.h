@@ -19,6 +19,7 @@
 #include "velox/common/memory/AllocationPool.h"
 #include "velox/common/memory/ByteStream.h"
 #include "velox/common/memory/CompactDoubleList.h"
+#include "velox/common/memory/Memory.h"
 #include "velox/common/memory/StreamArena.h"
 #include "velox/type/StringView.h"
 
@@ -34,7 +35,7 @@ namespace facebook::velox {
 // CompactDoubleList struct immediately after the header. The last 4 bytes of a
 // free block contain its length. kPreviousFree means that the block immediately
 // below is free. In this case the uint32_t below the header has the size of the
-// previous free block. The last word of a MappedMemory::PageRun backing a
+// previous free block. The last word of a Allocation::PageRun backing a
 // HashStringAllocator is set to kArenaEnd.
 class HashStringAllocator : public StreamArena {
  public:
@@ -49,6 +50,7 @@ class HashStringAllocator : public StreamArena {
     static constexpr uint32_t kContinued = 1U << 30;
     static constexpr uint32_t kPreviousFree = 1U << 29;
     static constexpr uint32_t kSizeMask = (1U << 29) - 1;
+    static constexpr uint32_t kContinuedPtrSize = sizeof(void*);
 
     // Marker at end of a PageRun. Distinct from valid headers since
     // all the 3 high bits are set, which is not valid for a header.
@@ -115,10 +117,19 @@ class HashStringAllocator : public StreamArena {
       return begin() + size();
     }
 
-    // Returns Header of the next block or null if at the end of arena.
+    /// Returns the Header of the block that is physically next to this block or
+    /// null if this is the last block of the arena.
     Header* FOLLY_NULLABLE next() {
       auto next = reinterpret_cast<Header*>(end());
       return next->data_ == kArenaEnd ? nullptr : next;
+    }
+
+    /// Returns the header of the next block in a multi-part allocation. The
+    /// caller must ensure that isContinued() returns true before calling this
+    /// method.
+    HashStringAllocator::Header* nextContinued() {
+      VELOX_DCHECK(isContinued());
+      return *reinterpret_cast<Header**>(end() - kContinuedPtrSize);
     }
 
    private:
@@ -130,9 +141,8 @@ class HashStringAllocator : public StreamArena {
     char* FOLLY_NULLABLE position;
   };
 
-  explicit HashStringAllocator(memory::MappedMemory* FOLLY_NONNULL mappedMemory)
-      : StreamArena(mappedMemory),
-        pool_(mappedMemory, AllocationPool::kHashTableOwner) {}
+  explicit HashStringAllocator(memory::MemoryPool* FOLLY_NONNULL pool)
+      : StreamArena(pool), pool_(pool) {}
 
   // Copies a StringView at 'offset' in 'group' to storage owned by
   // the hash table. Updates the StringView.
@@ -270,8 +280,8 @@ class HashStringAllocator : public StreamArena {
     pool_.clear();
   }
 
-  memory::MappedMemory* FOLLY_NONNULL mappedMemory() const {
-    return pool_.mappedMemory();
+  memory::MemoryPool* FOLLY_NONNULL pool() const {
+    return pool_.pool();
   }
 
   uint64_t cumulativeBytes() const {
@@ -283,11 +293,11 @@ class HashStringAllocator : public StreamArena {
   void checkConsistency() const;
 
  private:
-  static constexpr int32_t kUnitSize = 16 * memory::MappedMemory::kPageSize;
+  static constexpr int32_t kUnitSize = 16 * memory::AllocationTraits::kPageSize;
   static constexpr int32_t kMinContiguous = 48;
 
   // Adds 'bytes' worth of contiguous space to the free list. This
-  // grows the footprint in MappedMemory but does not allocate
+  // grows the footprint in MemoryAllocator but does not allocate
   // anything yet. Throws if fails to grow. The caller typically knows
   // a cap on memory to allocate and uses this and freeSpace() to make
   // sure that there is space to accommodate the expected need before
@@ -392,7 +402,7 @@ struct StlAllocator {
   template <class U>
   explicit StlAllocator(const StlAllocator<U>& allocator)
       : allocator_{allocator.allocator()} {
-    VELOX_CHECK(allocator_);
+    VELOX_CHECK_NOT_NULL(allocator_);
   }
 
   T* FOLLY_NONNULL allocate(std::size_t n) {

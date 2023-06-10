@@ -24,18 +24,18 @@
 
 using namespace facebook::velox::memory;
 
-constexpr int64_t kMemoryFootprintIncrement = kDefaultAlignment;
+constexpr int64_t kMemoryFootprintIncrement = MemoryAllocator::kMaxAlignment;
 
 namespace facebook::velox::memory {
 
 class BenchmarkHelper {
  public:
-  BenchmarkHelper(MemoryManager<MemoryAllocator, kNoAlignment>& manager)
+  explicit BenchmarkHelper(MemoryManager& manager)
       : manager_{manager}, leaves_{findLeaves()} {}
 
   std::vector<MemoryPool*> findLeaves() {
     std::vector<MemoryPool*> leaves;
-    findLeavesOf(manager_.getRoot(), leaves);
+    findLeavesOf(manager_.testingDefaultRoot(), leaves);
     return leaves;
   }
 
@@ -45,8 +45,10 @@ class BenchmarkHelper {
       return;
     }
 
-    subtree.visitChildren(
-        [this, &leaves](MemoryPool* child) { findLeavesOf(*child, leaves); });
+    subtree.visitChildren([this, &leaves](MemoryPool* child) {
+      findLeavesOf(*child, leaves);
+      return true;
+    });
   }
 
   // Always in parallel, single pool performance can be tested with
@@ -62,30 +64,15 @@ class BenchmarkHelper {
 
  private:
   // TODO: move semantic is better
-  MemoryManager<MemoryAllocator, kNoAlignment>& manager_;
+  MemoryManager& manager_;
   std::vector<MemoryPool*> leaves_;
 };
 } // namespace facebook::velox::memory
 
 BENCHMARK(SingleNodeAlloc, iters) {
   folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kNoAlignment> manager{};
-  auto pool = manager.getRoot().addChild("pride_of_higara");
-
-  for (size_t i = 0; i < iters; ++i) {
-    auto dataSize = (i + 1) * kMemoryFootprintIncrement;
-    suspender.dismiss();
-    auto p = pool->allocate(dataSize);
-    suspender.rehire();
-    pool->free(p, dataSize);
-  }
-}
-// Should be the same.
-BENCHMARK(SingleNodeAllocWithCap, iters) {
-  folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kNoAlignment> manager{};
-  auto pool = manager.getRoot().addChild(
-      "pride_of_higara", iters * kMemoryFootprintIncrement);
+  MemoryManager manager{};
+  auto pool = manager.addRootPool("pride_of_higara");
 
   for (size_t i = 0; i < iters; ++i) {
     auto dataSize = (i + 1) * kMemoryFootprintIncrement;
@@ -98,8 +85,8 @@ BENCHMARK(SingleNodeAllocWithCap, iters) {
 
 BENCHMARK(SingleNodeFree, iters) {
   folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kNoAlignment> manager{};
-  auto pool = manager.getRoot().addChild("pride_of_higara");
+  MemoryManager manager{};
+  auto pool = manager.addRootPool("pride_of_higara");
 
   for (size_t i = 0; i < iters; ++i) {
     auto dataSize = (i + 1) * kMemoryFootprintIncrement;
@@ -112,8 +99,8 @@ BENCHMARK(SingleNodeFree, iters) {
 
 BENCHMARK(SingleNodeRealloc, iters) {
   folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kNoAlignment> manager{};
-  auto pool = manager.getRoot().addChild("pride_of_higara");
+  MemoryManager manager{};
+  auto pool = manager.addRootPool("pride_of_higara");
 
   void* p = pool->allocate(kMemoryFootprintIncrement);
   for (size_t i = 0; i < iters; ++i) {
@@ -129,26 +116,8 @@ BENCHMARK(SingleNodeRealloc, iters) {
 
 BENCHMARK(SingleNodeAlignedAlloc, iters) {
   folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kDefaultAlignment> manager{};
-  auto pool = manager.getRoot().addChild("pride_of_higara");
-
-  for (size_t i = 0; i < iters; ++i) {
-    auto dataSize = (i + 1) * kMemoryFootprintIncrement;
-    suspender.dismiss();
-    auto p = pool->allocate(dataSize);
-    suspender.rehire();
-    pool->free(p, dataSize);
-  }
-}
-
-BENCHMARK(SingleNodeAlignedAllocWithCap, iters) {
-  folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kDefaultAlignment> manager{};
-  auto unalignedTotal = iters * kMemoryFootprintIncrement;
-  auto alignedCap = unalignedTotal % kDefaultAlignment == 0
-      ? unalignedTotal
-      : (unalignedTotal / kDefaultAlignment + 1) * kDefaultAlignment;
-  auto pool = manager.getRoot().addChild("pride_of_higara", alignedCap);
+  MemoryManager manager{};
+  auto pool = manager.addRootPool("pride_of_higara");
 
   for (size_t i = 0; i < iters; ++i) {
     auto dataSize = (i + 1) * kMemoryFootprintIncrement;
@@ -161,8 +130,8 @@ BENCHMARK(SingleNodeAlignedAllocWithCap, iters) {
 
 BENCHMARK(SingleNodeAlignedRealloc, iters) {
   folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kDefaultAlignment> manager{};
-  auto pool = manager.getRoot().addChild("pride_of_higara");
+  MemoryManager manager{};
+  auto pool = manager.addRootPool("pride_of_higara");
 
   void* p = pool->allocate(kMemoryFootprintIncrement);
   for (size_t i = 0; i < iters; ++i) {
@@ -177,12 +146,9 @@ BENCHMARK(SingleNodeAlignedRealloc, iters) {
 }
 
 namespace {
-void addNLeaves(
-    MemoryPool& pool,
-    size_t n,
-    int64_t cap = std::numeric_limits<int64_t>::max()) {
+void addNLeaves(MemoryPool& pool, size_t n) {
   for (size_t i = 0; i < n; ++i) {
-    pool.addChild(pool.name() + ".leaf_" + folly::to<std::string>(i), cap);
+    pool.addLeafChild(pool.name() + ".leaf_" + folly::to<std::string>(i));
   }
 }
 } // namespace
@@ -191,8 +157,8 @@ void addNLeaves(
 // with single leaf runs.
 BENCHMARK(FlatTree, iters) {
   folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kNoAlignment> manager{};
-  addNLeaves(manager.getRoot(), 10 * 20);
+  MemoryManager manager{};
+  addNLeaves(manager.testingDefaultRoot(), 10 * 20);
   BenchmarkHelper helper{manager};
   suspender.dismiss();
   helper.runForEachPool([iters](MemoryPool& pool) {
@@ -211,10 +177,10 @@ BENCHMARK(FlatTree, iters) {
 // with single leaf runs.
 BENCHMARK(DeeperTree, iters) {
   folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kNoAlignment> manager{};
+  MemoryManager manager{};
   for (size_t i = 0; i < 10; ++i) {
-    auto child = manager.getRoot().addChild(
-        "query_fragment_" + folly::to<std::string>(i));
+    auto child =
+        manager.addRootPool("query_fragment_" + folly::to<std::string>(i));
     addNLeaves(*child, 20);
   }
   BenchmarkHelper helper{manager};
@@ -233,8 +199,8 @@ BENCHMARK(DeeperTree, iters) {
 
 BENCHMARK(FlatSubtree, iters) {
   folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kNoAlignment> manager{};
-  auto child = manager.getRoot().addChild("query_fragment_1");
+  MemoryManager manager{};
+  auto child = manager.addRootPool("query_fragment_1");
   addNLeaves(*child, 10 * 20);
   BenchmarkHelper helper{manager};
   suspender.dismiss();
@@ -252,10 +218,10 @@ BENCHMARK(FlatSubtree, iters) {
 
 BENCHMARK(FlatSticks, iters) {
   folly::BenchmarkSuspender suspender;
-  MemoryManager<MemoryAllocator, kNoAlignment> manager{};
+  MemoryManager manager{};
   for (size_t i = 0; i < 10 * 20; ++i) {
-    auto child = manager.getRoot().addChild(
-        "query_fragment_" + folly::to<std::string>(i));
+    auto child =
+        manager.addRootPool("query_fragment_" + folly::to<std::string>(i));
     addNLeaves(*child, 1);
   }
   BenchmarkHelper helper{manager};

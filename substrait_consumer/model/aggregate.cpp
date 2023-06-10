@@ -74,7 +74,8 @@ std::vector<RowVectorPtr> createData(
 
     for (int k = 0; k < batch_num; k++) {
       for (int i = 0; i < bitmap_num; i++) {
-        auto v = BaseVector::createConstant(variant(data), batch_size, pool);
+        auto v = BaseVector::createConstant(
+            VARCHAR(), variant(data), batch_size, pool);
         // auto v = BaseVector::create(VARCHAR(), batch_size, pool);
         // auto flat = v->as<FlatVector<StringView>>();
         // for (int j = 0; j < batch_size; j++)
@@ -95,8 +96,8 @@ std::vector<RowVectorPtr> createData(
             raw_values[j] = rand() % 1024;
           vectors[k].push_back(v);
         } else {
-          auto v =
-              BaseVector::createConstant(variant((int)0), batch_size, pool);
+          auto v = BaseVector::createConstant(
+              INTEGER(), variant((int)0), batch_size, pool);
           vectors[k].push_back(v);
         }
       }
@@ -145,10 +146,10 @@ int main(int argc, char** argv) {
   const int group_num = atoi(argv[4]);
   const int batch_size = 1 * 1024 * 1024;
   int thread_num = 6;
-  if(argc >= 6)
-       thread_num = atoi(argv[5]);
+  if (argc >= 6)
+    thread_num = atoi(argv[5]);
 
-  auto pool = memory::getDefaultMemoryPool();
+  auto pool = memory::addDefaultLeafMemoryPool();
   auto type = createRowType(attribute_num, bitmap_num);
   auto attribute_names = type->names();
   auto data = createData(

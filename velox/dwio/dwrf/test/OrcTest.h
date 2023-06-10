@@ -39,11 +39,12 @@ inline std::string getExampleFilePath(const std::string& fileName) {
 
 class MockStripeStreams : public StripeStreams {
  public:
-  MockStripeStreams() : pool_{memory::getDefaultMemoryPool()} {};
+  MockStripeStreams() : pool_{memory::addDefaultLeafMemoryPool()} {};
   ~MockStripeStreams() = default;
 
   std::unique_ptr<dwio::common::SeekableInputStream> getStream(
       const DwrfStreamIdentifier& si,
+      std::string_view /* unused */,
       bool throwIfNotFound) const override {
     return std::unique_ptr<dwio::common::SeekableInputStream>(getStreamProxy(
         si.encodingKey().node,
@@ -54,6 +55,7 @@ class MockStripeStreams : public StripeStreams {
   std::function<BufferPtr()> getIntDictionaryInitializerForNode(
       const EncodingKey& ek,
       uint64_t /* unused */,
+      const StreamLabels& /* streamLabels */,
       uint64_t /* unused */) override {
     return [this, nodeId = ek.node, sequenceId = ek.sequence]() {
       BufferPtr dictionaryData;
@@ -226,9 +228,12 @@ class MockIndexBuilder : public IndexBuilder {
 
 class ProtoWriter : public WriterBase {
  public:
-  ProtoWriter(memory::MemoryPool& pool)
-      : WriterBase{std::make_unique<dwio::common::MemorySink>(pool, 1024)} {
-    initContext(std::make_shared<Config>(), pool.addChild("proto_writer"));
+  ProtoWriter(
+      std::shared_ptr<memory::MemoryPool> pool,
+      memory::MemoryPool& sinkPool)
+      : WriterBase{std::make_unique<dwio::common::MemorySink>(sinkPool, 1024)} {
+    initContext(
+        std::make_shared<Config>(), pool->addAggregateChild("proto_writer"));
   }
 
   template <typename T>

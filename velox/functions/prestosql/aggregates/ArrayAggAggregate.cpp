@@ -46,12 +46,6 @@ class ArrayAggAggregate : public exec::Aggregate {
     }
   }
 
-  void finalize(char** groups, int32_t numGroups) override {
-    for (auto i = 0; i < numGroups; i++) {
-      value<ArrayAccumulator>(groups[i])->elements.finalize(allocator_);
-    }
-  }
-
   void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
       override {
     auto vector = (*result)->as<ArrayVector>();
@@ -175,7 +169,7 @@ class ArrayAggAggregate : public exec::Aggregate {
   DecodedVector decodedIntermediate_;
 };
 
-bool registerArrayAggregate(const std::string& name) {
+exec::AggregateRegistrationResult registerArray(const std::string& name) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures{
       exec::AggregateFunctionSignatureBuilder()
           .typeVariable("E")
@@ -184,7 +178,7 @@ bool registerArrayAggregate(const std::string& name) {
           .argumentType("E")
           .build()};
 
-  exec::registerAggregateFunction(
+  return exec::registerAggregateFunction(
       name,
       std::move(signatures),
       [name](
@@ -195,13 +189,12 @@ bool registerArrayAggregate(const std::string& name) {
             argTypes.size(), 1, "{} takes at most one argument", name);
         return std::make_unique<ArrayAggAggregate>(resultType);
       });
-  return true;
 }
 
 } // namespace
 
-void registerArrayAggregate() {
-  registerArrayAggregate(kArrayAgg);
+void registerArrayAggregate(const std::string& prefix) {
+  registerArray(prefix + kArrayAgg);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

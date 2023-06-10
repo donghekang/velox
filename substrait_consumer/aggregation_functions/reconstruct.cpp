@@ -1,8 +1,10 @@
 #include "substrait_consumer/aggregation_functions/registerAggregate.h"
 #include "velox/exec/Aggregate.h"
 #include "velox/expression/FunctionSignature.h"
-#include "velox/functions/prestosql/aggregates/SimpleNumericAggregate.h"
-#include "velox/functions/prestosql/aggregates/SingleValueAccumulator.h"
+#include "velox/functions/lib/aggregates/SimpleNumericAggregate.h"
+#include "velox/functions/lib/aggregates/SingleValueAccumulator.h"
+// #include "velox/functions/prestosql/aggregates/SimpleNumericAggregate.h"
+// #include "velox/functions/prestosql/aggregates/SingleValueAccumulator.h"
 
 using namespace facebook::velox;
 
@@ -59,8 +61,8 @@ class ReconstructHook final : public aggregate::AggregationHook {
 
 template <typename T>
 class NumericReconstructAggregate
-    : public aggregate::SimpleNumericAggregate<T, T, T> {
-  using BaseAggregate = aggregate::SimpleNumericAggregate<T, T, T>;
+    : public functions::aggregate::SimpleNumericAggregate<T, T, T> {
+  using BaseAggregate = functions::aggregate::SimpleNumericAggregate<T, T, T>;
 
  public:
   explicit NumericReconstructAggregate(TypePtr resultType)
@@ -174,20 +176,20 @@ class NonNumericReconstructAggregate : public exec::Aggregate {
       : exec::Aggregate(resultType) {}
 
   int32_t accumulatorFixedWidthSize() const override {
-    return sizeof(aggregate::SingleValueAccumulator);
+    return sizeof(functions::aggregate::SingleValueAccumulator);
   }
 
   void initializeNewGroups(
       char** groups,
       folly::Range<const vector_size_t*> indices) override {
     for (auto i : indices) {
-      new (groups[i] + offset_) aggregate::SingleValueAccumulator();
+      new (groups[i] + offset_) functions::aggregate::SingleValueAccumulator();
     }
   }
 
-  void finalize(char** /* groups */, int32_t /* numGroups */) override {
-    // Nothing to do
-  }
+  // void finalize(char** /* groups */, int32_t /* numGroups */) override {
+  //   // Nothing to do
+  // }
 
   void addRawInput(
       char** groups,
@@ -234,7 +236,8 @@ class NonNumericReconstructAggregate : public exec::Aggregate {
 
     for (auto i = 0; i < numGroups; ++i) {
       char* group = groups[i];
-      auto accumulator = value<::aggregate::SingleValueAccumulator>(group);
+      auto accumulator =
+          value<functions::aggregate::SingleValueAccumulator>(group);
       if (!accumulator->hasValue())
         (*result)->setNull(i, true);
       else {
@@ -253,7 +256,8 @@ class NonNumericReconstructAggregate : public exec::Aggregate {
 
   void destroy(folly::Range<char**> groups) override {
     for (auto group : groups) {
-      value<::aggregate::SingleValueAccumulator>(group)->destroy(allocator_);
+      value<functions::aggregate::SingleValueAccumulator>(group)->destroy(
+          allocator_);
     }
   }
 
@@ -269,7 +273,8 @@ class NonNumericReconstructAggregate : public exec::Aggregate {
     rows.applyToSelected([&](vector_size_t i) {
       if (decoded.isNullAt(i) || decoded.valueAt<StringView>(i).size() == 0)
         return;
-      auto accumulator = value<aggregate::SingleValueAccumulator>(groups[i]);
+      auto accumulator =
+          value<functions::aggregate::SingleValueAccumulator>(groups[i]);
       accumulator->write(baseVector, indices[i], allocator_);
     });
   }
@@ -285,12 +290,14 @@ class NonNumericReconstructAggregate : public exec::Aggregate {
     if (decoded.isConstantMapping()) {
       if (decoded.isNullAt(0) || decoded.valueAt<StringView>(0).size() == 0)
         return;
-      auto accumulator = value<::aggregate::SingleValueAccumulator>(group);
+      auto accumulator =
+          value<functions::aggregate::SingleValueAccumulator>(group);
       accumulator->write(baseVector, indices[0], allocator_);
       return;
     }
 
-    auto accumulator = value<::aggregate::SingleValueAccumulator>(group);
+    auto accumulator =
+        value<functions::aggregate::SingleValueAccumulator>(group);
     rows.applyToSelected([&](vector_size_t i) {
       if (decoded.isNullAt(i) || decoded.valueAt<StringView>(i).size() == 0)
         return;

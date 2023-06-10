@@ -14,31 +14,37 @@
  * limitations under the License.
  */
 #include "velox/functions/prestosql/window/WindowFunctionsRegistration.h"
-#include "velox/exec/Aggregate.h"
+#include "velox/functions/lib/window/NthValue.h"
 
 namespace facebook::velox::window {
+
+namespace prestosql {
 
 extern void registerRowNumber(const std::string& name);
 extern void registerRank(const std::string& name);
 extern void registerDenseRank(const std::string& name);
 extern void registerPercentRank(const std::string& name);
 extern void registerCumeDist(const std::string& name);
-extern void registerNthValue(const std::string& name);
-extern void registerAggregateWindowFunction(const std::string& name);
+extern void registerNtile(const std::string& name);
+extern void registerFirstValue(const std::string& name);
+extern void registerLastValue(const std::string& name);
+extern void registerLag(const std::string& name);
+extern void registerLead(const std::string& name);
 
-void registerWindowFunctions() {
-  window::registerRowNumber("row_number");
-  window::registerRank("rank");
-  window::registerDenseRank("dense_rank");
-  window::registerPercentRank("percent_rank");
-  window::registerCumeDist("cume_dist");
-  window::registerNthValue("nth_value");
-
-  // Register all aggregate functions as window functions.
-  const auto& aggregateFunctions = exec::aggregateFunctions();
-  for (const auto& aggregateEntry : aggregateFunctions) {
-    window::registerAggregateWindowFunction(aggregateEntry.first);
-  }
+void registerAllWindowFunctions(const std::string& prefix) {
+  registerRowNumber(prefix + "row_number");
+  registerRank(prefix + "rank");
+  registerDenseRank(prefix + "dense_rank");
+  registerPercentRank(prefix + "percent_rank");
+  registerCumeDist(prefix + "cume_dist");
+  registerNtile(prefix + "ntile");
+  functions::window::registerBigintNthValue(prefix + "nth_value");
+  registerFirstValue(prefix + "first_value");
+  registerLastValue(prefix + "last_value");
+  registerLag(prefix + "lag");
+  registerLead(prefix + "lead");
 }
+
+} // namespace prestosql
 
 } // namespace facebook::velox::window

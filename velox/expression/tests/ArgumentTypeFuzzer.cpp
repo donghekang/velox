@@ -119,4 +119,22 @@ bool ArgumentTypeFuzzer::fuzzArgumentTypes(uint32_t maxVariadicArgs) {
   return true;
 }
 
+TypePtr ArgumentTypeFuzzer::fuzzReturnType() {
+  VELOX_CHECK_EQ(
+      returnType_,
+      nullptr,
+      "Only fuzzing uninitialized return type is allowed.");
+
+  determineUnboundedTypeVariables();
+  if (signature_.returnType().baseName() == "any") {
+    returnType_ = randomType(rng_);
+    return returnType_;
+  } else {
+    returnType_ = exec::SignatureBinder::tryResolveType(
+        signature_.returnType(), variables(), bindings_);
+    VELOX_CHECK_NE(returnType_, nullptr);
+    return returnType_;
+  }
+}
+
 } // namespace facebook::velox::test

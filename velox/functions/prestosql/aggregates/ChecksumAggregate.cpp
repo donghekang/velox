@@ -36,8 +36,6 @@ class ChecksumAggregate : public exec::Aggregate {
   explicit ChecksumAggregate(const TypePtr& resultType)
       : Aggregate(resultType) {}
 
-  void finalize(char** /* groups */, int32_t /* numGroups */) override {}
-
   int32_t accumulatorFixedWidthSize() const override {
     return sizeof(int64_t);
   }
@@ -209,7 +207,7 @@ class ChecksumAggregate : public exec::Aggregate {
   DecodedVector decodedIntermediate_;
 };
 
-bool registerChecksumAggregate(const std::string& name) {
+exec::AggregateRegistrationResult registerChecksum(const std::string& name) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures{
       exec::AggregateFunctionSignatureBuilder()
           .typeVariable("T")
@@ -219,7 +217,7 @@ bool registerChecksumAggregate(const std::string& name) {
           .build(),
   };
 
-  exec::registerAggregateFunction(
+  return exec::registerAggregateFunction(
       name,
       std::move(signatures),
       [&name](
@@ -234,14 +232,12 @@ bool registerChecksumAggregate(const std::string& name) {
 
         return std::make_unique<ChecksumAggregate>(VARBINARY());
       });
-
-  return true;
 }
 
 } // namespace
 
-void registerChecksumAggregate() {
-  registerChecksumAggregate(kChecksum);
+void registerChecksumAggregate(const std::string& prefix) {
+  registerChecksum(prefix + kChecksum);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

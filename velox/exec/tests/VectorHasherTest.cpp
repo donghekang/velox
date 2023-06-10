@@ -15,6 +15,7 @@
  */
 #include "velox/exec/VectorHasher.h"
 #include <gtest/gtest.h>
+#include "velox/common/base/tests/GTestUtils.h"
 #include "velox/type/Type.h"
 #include "velox/vector/tests/utils/VectorMaker.h"
 
@@ -24,7 +25,7 @@ using namespace facebook::velox::exec;
 class VectorHasherTest : public testing::Test {
  protected:
   void SetUp() override {
-    pool_ = facebook::velox::memory::getDefaultMemoryPool();
+    pool_ = facebook::velox::memory::addDefaultLeafMemoryPool();
     allRows_ = SelectivityVector(100);
 
     oddRows_ = VectorHasherTest::makeOddRows(100);
@@ -225,7 +226,7 @@ TEST_F(VectorHasherTest, flat) {
 
 TEST_F(VectorHasherTest, nonNullConstant) {
   auto hasher = exec::VectorHasher::create(INTEGER(), 1);
-  auto vector = BaseVector::createConstant(123, 100, pool_.get());
+  auto vector = BaseVector::createConstant(INTEGER(), 123, 100, pool_.get());
 
   auto hash = folly::hasher<int32_t>()(123);
 
@@ -246,8 +247,7 @@ TEST_F(VectorHasherTest, nonNullConstant) {
 
 TEST_F(VectorHasherTest, nullConstant) {
   auto hasher = exec::VectorHasher::create(INTEGER(), 1);
-  auto vector =
-      BaseVector::createConstant(variant(TypeKind::INTEGER), 100, pool_.get());
+  auto vector = BaseVector::createNullConstant(INTEGER(), 100, pool_.get());
 
   raw_vector<uint64_t> hashes(100);
   std::fill(hashes.begin(), hashes.end(), 0);
@@ -942,4 +942,16 @@ TEST_F(VectorHasherTest, simdRange) {
           result[i]);
     }
   }
+}
+
+TEST_F(VectorHasherTest, typeMismatch) {
+  auto hasher = VectorHasher::create(BIGINT(), 0);
+
+  auto data = vectorMaker_->flatVector<std::string>(
+      {"a",
+       "b"
+       "c"});
+  SelectivityVector rows(data->size());
+  VELOX_ASSERT_THROW(
+      hasher->decode(*data, rows), "Type mismatch: BIGINT vs. VARCHAR");
 }

@@ -20,8 +20,6 @@
 #include "velox/exec/tests/utils/TempFilePath.h"
 #include "velox/type/tests/SubfieldFiltersBuilder.h"
 
-#include <folly/executors/IOThreadPoolExecutor.h>
-
 namespace facebook::velox::exec::test {
 
 static const std::string kHiveConnectorId = "test-hive";
@@ -67,7 +65,8 @@ class HiveConnectorTestBase : public OperatorTestBase {
       uint64_t start = 0,
       uint64_t length = std::numeric_limits<uint64_t>::max());
 
-  /// Split file at path 'filePath' into 'splitCount' splits.
+  /// Split file at path 'filePath' into 'splitCount' splits. If not local file,
+  /// file size can be given as 'externalSize'.
   static std::vector<std::shared_ptr<connector::hive::HiveConnectorSplit>>
   makeHiveConnectorSplits(
       const std::string& filePath,
@@ -86,6 +85,14 @@ class HiveConnectorTestBase : public OperatorTestBase {
         remainingFilter);
   }
 
+  /// @param name Column name.
+  /// @param type Column type.
+  /// @param Required subfields of this column.
+  static std::shared_ptr<connector::hive::HiveColumnHandle> makeColumnHandle(
+      const std::string& name,
+      const TypePtr& type,
+      const std::vector<std::string>& requiredSubfields);
+
   /// @param targetDirectory Final directory of the target table after commit.
   /// @param writeDirectory Write directory of the target table before commit.
   /// @param tableType Whether to create a new table, insert into an existing
@@ -95,14 +102,9 @@ class HiveConnectorTestBase : public OperatorTestBase {
       std::string targetDirectory,
       std::optional<std::string> writeDirectory = std::nullopt,
       connector::hive::LocationHandle::TableType tableType =
-          connector::hive::LocationHandle::TableType::kNew,
-      connector::hive::LocationHandle::WriteMode writeMode = connector::hive::
-          LocationHandle::WriteMode::kDirectToTargetNewDirectory) {
+          connector::hive::LocationHandle::TableType::kNew) {
     return std::make_shared<connector::hive::LocationHandle>(
-        targetDirectory,
-        writeDirectory.value_or(targetDirectory),
-        tableType,
-        writeMode);
+        targetDirectory, writeDirectory.value_or(targetDirectory), tableType);
   }
 
   /// Build a HiveInsertTableHandle.
@@ -117,7 +119,9 @@ class HiveConnectorTestBase : public OperatorTestBase {
       const std::vector<std::string>& tableColumnNames,
       const std::vector<TypePtr>& tableColumnTypes,
       const std::vector<std::string>& partitionedBy,
-      std::shared_ptr<connector::hive::LocationHandle> locationHandle);
+      std::shared_ptr<connector::hive::LocationHandle> locationHandle,
+      const dwio::common::FileFormat tableStorageFormat =
+          dwio::common::FileFormat::DWRF);
 
   static std::shared_ptr<connector::hive::HiveColumnHandle> regularColumn(
       const std::string& name,
@@ -141,11 +145,9 @@ class HiveConnectorTestBase : public OperatorTestBase {
     return assignments;
   }
 
-  memory::MappedMemory* mappedMemory() {
-    return memory::MappedMemory::getInstance();
+  memory::MemoryAllocator* allocator() {
+    return memory::MemoryAllocator::getInstance();
   }
-
-  std::unique_ptr<folly::IOThreadPoolExecutor> executor_;
 };
 
 class HiveConnectorSplitBuilder {

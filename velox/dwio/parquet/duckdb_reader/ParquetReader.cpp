@@ -257,7 +257,13 @@ ParquetRowReader::ParquetRowReader(
       state_, std::move(columnIds), std::move(groups), &filters_);
 }
 
-uint64_t ParquetRowReader::next(uint64_t /*size*/, velox::VectorPtr& result) {
+uint64_t ParquetRowReader::next(
+    uint64_t /*size*/,
+    velox::VectorPtr& result,
+    const dwio::common::Mutation* mutation) {
+  VELOX_CHECK(
+      !mutation || !mutation->deletedRows,
+      "Mutation pushdown is only supported in selective reader");
   ::duckdb::DataChunk output;
   // TODO: We are using the default duckdb allocator which uses Velox's default
   // memory manager, not the one specified in the ReaderOptions.
@@ -309,7 +315,7 @@ std::optional<size_t> ParquetRowReader::estimatedRowSize() const {
 }
 
 ParquetReader::ParquetReader(
-    std::unique_ptr<dwio::common::InputStream> stream,
+    std::shared_ptr<dwio::common::InputStream> stream,
     const dwio::common::ReaderOptions& options)
     : fileSystem_(
           std::make_unique<duckdb::InputStreamFileSystem>(std::move(stream))),

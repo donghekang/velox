@@ -131,51 +131,53 @@ class ByteSink {
   virtual void finish() {}
 };
 
-// class ByteSinkBuffer : public std::basic_streambuf<char> {
-//  public:
-//   using super = std::basic_streambuf<char>;
-//   using int_type = super::int_type;
-//   using traits = std::char_traits<char>;
+class ByteSinkBuffer : public std::basic_streambuf<char> {
+ public:
+  using super = std::basic_streambuf<char>;
+  using int_type = super::int_type;
+  using traits = std::char_traits<char>;
 
-//   static constexpr const int_type kEOF = traits::eof();
-//   static constexpr const size_t kPutAreaSize = 1UL << 10;
+  static constexpr const int_type kEOF = traits::eof();
+  static constexpr const size_t kPutAreaSize = 1UL << 10;
 
-//   explicit ByteSinkBuffer(ByteSink& sink) : sink_(sink) {
-//     setp(&putArea_[0], &putArea_[kPutAreaSize]);
-//   }
+  explicit ByteSinkBuffer(ByteSink& sink) : sink_(sink) {
+    setp(&putArea_[0], &putArea_[kPutAreaSize]);
+  }
 
-//   ~ByteSinkBuffer() override {
-//     sync();
-//   }
+  ~ByteSinkBuffer() override {
+    sync();
+  }
 
-//   /**
-//    * Purge all buffered stuff to underlying sink.
-//    * Per streambuf's interface:
-//    * "Returns unspecified value not equal to Traits::eof() on success,
-//    * Traits::eof() on failure.".  The return value's type is `int_type`,
-//    * just an integer bigger than `char`, which can accommodate all `char`
-//    * values plus one extra, special "eof" value.
-//    *
-//    * The actual purging out to the sink is done in our `flush()` method.
-//    * EOF is returned by `flush` if the underlying
-//    * sink is not accepting any more writes, or is `bad()`.
-//    * Otherwise we continue normally, with a new buffer, containing just the
-//    * given character.
-//    */
-//   int_type overflow(int_type ch = kEOF) override;
+  /**
+   * Purge all buffered stuff to underlying sink.
+   * Per streambuf's interface:
+   * "Returns unspecified value not equal to Traits::eof() on success,
+   * Traits::eof() on failure.".  The return value's type is `int_type`,
+   * just an integer bigger than `char`, which can accommodate all `char`
+   * values plus one extra, special "eof" value.
+   *
+   * The actual purging out to the sink is done in our `flush()` method.
+   * EOF is returned by `flush` if the underlying
+   * sink is not accepting any more writes, or is `bad()`.
+   * Otherwise we continue normally, with a new buffer, containing just the
+   * given character.
+   */
+  int_type overflow(int_type ch = kEOF) override;
 
-//  protected:
-//   int32_t sync() override {
-//     flush();
-//     return 0;
-//   }
+ protected:
+  int32_t sync() override {
+    flush();
+    return 0;
+  }
 
-//  private:
-//   int_type flush();
+ private:
+  int_type flush() {
+    return 0;
+  }
 
-//   char putArea_[kPutAreaSize];
-//   ByteSink& sink_;
-// };
+  char putArea_[kPutAreaSize];
+  ByteSink& sink_;
+};
 
 /**
  * Simple ByteSink that appends to a string.

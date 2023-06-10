@@ -38,6 +38,7 @@ TEST_F(PmodTest, int8) {
   EXPECT_EQ(std::nullopt, pmod<int8_t>(std::nullopt, 3));
   EXPECT_EQ(INT8_MAX, pmod<int8_t>(INT8_MAX, INT8_MIN));
   EXPECT_EQ(INT8_MAX - 1, pmod<int8_t>(INT8_MIN, INT8_MAX));
+  EXPECT_EQ(0, pmod<int64_t>(INT8_MIN, -1));
 }
 
 TEST_F(PmodTest, int16) {
@@ -47,6 +48,7 @@ TEST_F(PmodTest, int16) {
   EXPECT_EQ(-8, pmod<int16_t>(-1052, -12));
   EXPECT_EQ(INT16_MAX, pmod<int16_t>(INT16_MAX, INT16_MIN));
   EXPECT_EQ(INT16_MAX - 1, pmod<int16_t>(INT16_MIN, INT16_MAX));
+  EXPECT_EQ(0, pmod<int64_t>(INT16_MIN, -1));
 }
 
 TEST_F(PmodTest, int32) {
@@ -56,6 +58,7 @@ TEST_F(PmodTest, int32) {
   EXPECT_EQ(-11, pmod<int32_t>(-15181535, -12));
   EXPECT_EQ(INT32_MAX, pmod<int32_t>(INT32_MAX, INT32_MIN));
   EXPECT_EQ(INT32_MAX - 1, pmod<int32_t>(INT32_MIN, INT32_MAX));
+  EXPECT_EQ(0, pmod<int64_t>(INT32_MIN, -1));
 }
 
 TEST_F(PmodTest, int64) {
@@ -65,6 +68,7 @@ TEST_F(PmodTest, int64) {
   EXPECT_EQ(-5, pmod<int64_t>(-15181561541535, -23));
   EXPECT_EQ(INT64_MAX, pmod<int64_t>(INT64_MAX, INT64_MIN));
   EXPECT_EQ(INT64_MAX - 1, pmod<int64_t>(INT64_MIN, INT64_MAX));
+  EXPECT_EQ(0, pmod<int64_t>(INT64_MIN, -1));
 }
 
 class RemainderTest : public SparkFunctionBaseTest {
@@ -102,6 +106,8 @@ TEST_F(RemainderTest, int32) {
   EXPECT_EQ(-11, remainder<int32_t>(-15181535, -12));
   EXPECT_EQ(INT32_MAX, remainder<int32_t>(INT32_MAX, INT32_MIN));
   EXPECT_EQ(-1, remainder<int32_t>(INT32_MIN, INT32_MAX));
+  EXPECT_EQ(0, remainder<int32_t>(-15181535, -1));
+  EXPECT_EQ(0, remainder<int32_t>(INT32_MIN, -1));
 }
 
 TEST_F(RemainderTest, int64) {
@@ -177,6 +183,64 @@ TEST_F(ArithmeticTest, Divide) {
   EXPECT_TRUE(std::isnan(divide(kInf, -kInf).value_or(0)));
 }
 
+TEST_F(ArithmeticTest, acosh) {
+  const auto acosh = [&](std::optional<double> a) {
+    return evaluateOnce<double>("acosh(c0)", a);
+  };
+
+  EXPECT_EQ(acosh(1), 0);
+  EXPECT_TRUE(std::isnan(acosh(0).value_or(0)));
+  EXPECT_EQ(acosh(kInf), kInf);
+  EXPECT_EQ(acosh(std::nullopt), std::nullopt);
+  EXPECT_TRUE(std::isnan(acosh(kNan).value_or(0)));
+}
+
+TEST_F(ArithmeticTest, asinh) {
+  const auto asinh = [&](std::optional<double> a) {
+    return evaluateOnce<double>("asinh(c0)", a);
+  };
+
+  EXPECT_EQ(asinh(0), 0);
+  EXPECT_EQ(asinh(kInf), kInf);
+  EXPECT_EQ(asinh(-kInf), -kInf);
+  EXPECT_EQ(asinh(std::nullopt), std::nullopt);
+  EXPECT_TRUE(std::isnan(asinh(kNan).value_or(0)));
+}
+
+TEST_F(ArithmeticTest, atanh) {
+  const auto atanh = [&](std::optional<double> a) {
+    return evaluateOnce<double>("atanh(c0)", a);
+  };
+
+  EXPECT_EQ(atanh(0), 0);
+  EXPECT_EQ(atanh(1), kInf);
+  EXPECT_EQ(atanh(-1), -kInf);
+  EXPECT_TRUE(std::isnan(atanh(1.1).value_or(0)));
+  EXPECT_TRUE(std::isnan(atanh(-1.1).value_or(0)));
+  EXPECT_EQ(atanh(std::nullopt), std::nullopt);
+  EXPECT_TRUE(std::isnan(atanh(kNan).value_or(0)));
+}
+
+TEST_F(ArithmeticTest, sec) {
+  const auto sec = [&](std::optional<double> a) {
+    return evaluateOnce<double>("sec(c0)", a);
+  };
+
+  EXPECT_EQ(sec(0), 1);
+  EXPECT_EQ(sec(std::nullopt), std::nullopt);
+  EXPECT_TRUE(std::isnan(sec(kNan).value_or(0)));
+}
+
+TEST_F(ArithmeticTest, csc) {
+  const auto csc = [&](std::optional<double> a) {
+    return evaluateOnce<double>("csc(c0)", a);
+  };
+
+  EXPECT_EQ(csc(0), kInf);
+  EXPECT_EQ(csc(std::nullopt), std::nullopt);
+  EXPECT_TRUE(std::isnan(csc(kNan).value_or(0)));
+}
+
 class CeilFloorTest : public SparkFunctionBaseTest {
  protected:
   template <typename T>
@@ -216,6 +280,25 @@ TEST_F(CeilFloorTest, Limits) {
   EXPECT_EQ(
       std::numeric_limits<int64_t>::min(),
       floor<double>(-std::numeric_limits<double>::infinity()));
+}
+
+class BinTest : public SparkFunctionBaseTest {
+ protected:
+  std::optional<std::string> bin(std::optional<std::int64_t> arg) {
+    return evaluateOnce<std::string, int64_t>("bin(c0)", {arg}, {BIGINT()});
+  }
+};
+
+TEST_F(BinTest, bin) {
+  EXPECT_EQ(bin(std::nullopt), std::nullopt);
+  EXPECT_EQ(bin(13), "1101");
+  EXPECT_EQ(
+      bin(-13),
+      "1111111111111111111111111111111111111111111111111111111111110011");
+  EXPECT_EQ(
+      bin(std::numeric_limits<int64_t>::max()),
+      "111111111111111111111111111111111111111111111111111111111111111");
+  EXPECT_EQ(bin(0), "0");
 }
 
 } // namespace

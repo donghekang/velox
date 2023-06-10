@@ -23,14 +23,17 @@ namespace facebook::velox::dwrf {
 DwrfData::DwrfData(
     std::shared_ptr<const dwio::common::TypeWithId> nodeType,
     StripeStreams& stripe,
+    const StreamLabels& streamLabels,
     FlatMapContext flatMapContext)
     : memoryPool_(stripe.getMemoryPool()),
       nodeType_(std::move(nodeType)),
       flatMapContext_(std::move(flatMapContext)),
       rowsPerRowGroup_{stripe.rowsPerRowGroup()} {
   EncodingKey encodingKey{nodeType_->id, flatMapContext_.sequence};
-  std::unique_ptr<dwio::common::SeekableInputStream> stream =
-      stripe.getStream(encodingKey.forKind(proto::Stream_Kind_PRESENT), false);
+  std::unique_ptr<dwio::common::SeekableInputStream> stream = stripe.getStream(
+      encodingKey.forKind(proto::Stream_Kind_PRESENT),
+      streamLabels.label(),
+      false);
   if (stream) {
     notNullDecoder_ = createBooleanRleDecoder(std::move(stream), encodingKey);
   }
@@ -41,7 +44,9 @@ DwrfData::DwrfData(
   // because the first filter can come from a hash join or other run
   // time pushdown.
   indexStream_ = stripe.getStream(
-      encodingKey.forKind(proto::Stream_Kind_ROW_INDEX), false);
+      encodingKey.forKind(proto::Stream_Kind_ROW_INDEX),
+      streamLabels.label(),
+      false);
 }
 
 uint64_t DwrfData::skipNulls(uint64_t numValues, bool /*nullsOnly*/) {
@@ -131,29 +136,51 @@ void DwrfData::readNulls(
   }
 }
 
-std::vector<uint32_t> DwrfData::filterRowGroups(
+void DwrfData::filterRowGroups(
     const common::ScanSpec& scanSpec,
     uint64_t rowGroupSize,
-    const dwio::common::StatsContext& writerContext) {
-  if ((!index_ && !indexStream_) || !scanSpec.filter()) {
-    return {};
+    const dwio::common::StatsContext& writerContext,
+    FilterRowGroupsResult& result) {
+  if (!index_ && !indexStream_) {
+    return;
   }
-
   ensureRowGroupIndex();
   auto filter = scanSpec.filter();
-
-  std::vector<uint32_t> stridesToSkip;
   auto dwrfContext = reinterpret_cast<const StatsContext*>(&writerContext);
+  result.totalCount = std::max(result.totalCount, index_->entry_size());
+  auto nwords = bits::nwords(result.totalCount);
+  if (result.filterResult.size() < nwords) {
+    result.filterResult.resize(nwords);
+  }
+  auto metadataFiltersStartIndex = result.metadataFilterResults.size();
+  for (int i = 0; i < scanSpec.numMetadataFilters(); ++i) {
+    result.metadataFilterResults.emplace_back(
+        scanSpec.metadataFilterNodeAt(i), std::vector<uint64_t>(nwords));
+  }
   for (auto i = 0; i < index_->entry_size(); i++) {
     const auto& entry = index_->entry(i);
     auto columnStats =
         buildColumnStatisticsFromProto(entry.statistics(), *dwrfContext);
-    if (!testFilter(filter, columnStats.get(), rowGroupSize, nodeType_->type)) {
+    if (filter &&
+        !testFilter(filter, columnStats.get(), rowGroupSize, nodeType_->type)) {
       VLOG(1) << "Drop stride " << i << " on " << scanSpec.toString();
-      stridesToSkip.push_back(i); // Skipping stride based on column stats.
+      bits::setBit(result.filterResult.data(), i);
+      continue;
+    }
+    for (int j = 0; j < scanSpec.numMetadataFilters(); ++j) {
+      auto* metadataFilter = scanSpec.metadataFilterAt(j);
+      if (!testFilter(
+              metadataFilter,
+              columnStats.get(),
+              rowGroupSize,
+              nodeType_->type)) {
+        bits::setBit(
+            result.metadataFilterResults[metadataFiltersStartIndex + j]
+                .second.data(),
+            i);
+      }
     }
   }
-  return stridesToSkip;
 }
 
 } // namespace facebook::velox::dwrf

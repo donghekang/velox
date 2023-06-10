@@ -33,8 +33,8 @@ struct Multipart {
 class HashStringAllocatorTest : public testing::Test {
  protected:
   void SetUp() override {
-    instance_ = std::make_unique<HashStringAllocator>(
-        memory::MappedMemory::getInstance());
+    pool_ = memory::addDefaultLeafMemoryPool();
+    instance_ = std::make_unique<HashStringAllocator>(pool_.get());
     rng_.seed(1);
   }
 
@@ -82,6 +82,7 @@ class HashStringAllocatorTest : public testing::Test {
     return result;
   }
 
+  std::shared_ptr<memory::MemoryPool> pool_;
   std::unique_ptr<HashStringAllocator> instance_;
   int32_t sequence_ = 0;
   folly::Random::DefaultGenerator rng_;
@@ -104,6 +105,17 @@ TEST_F(HashStringAllocatorTest, allocate) {
       instance_->checkConsistency();
     }
   }
+  // We allow for some free overhead for free lists after all is freed.
+  EXPECT_LE(instance_->retainedSize() - instance_->freeSpace(), 200);
+}
+
+TEST_F(HashStringAllocatorTest, allocateLarge) {
+  // Verify that allocate() can handle sizes larger than the largest class size
+  // supported by memory allocators, that is, 256 pages.
+  auto size =
+      memory::AllocationTraits::pageBytes(pool_->largestSizeClass() + 1);
+  auto header = allocate(size);
+  instance_->free(header);
   // We allow for some free overhead for free lists after all is freed.
   EXPECT_LE(instance_->retainedSize() - instance_->freeSpace(), 200);
 }

@@ -34,7 +34,8 @@ struct Converter {
   // If in the future we change nullOutput in many functions we can revisit that
   // contract.
   static typename TypeTraits<KIND>::NativeType cast(T val, bool& nullOutput) {
-    VELOX_NYI();
+    VELOX_UNSUPPORTED(
+        "Conversion to {} is not supported", TypeTraits<KIND>::name);
   }
 };
 
@@ -74,14 +75,15 @@ struct Converter<
     std::enable_if_t<
         KIND == TypeKind::BOOLEAN || KIND == TypeKind::TINYINT ||
             KIND == TypeKind::SMALLINT || KIND == TypeKind::INTEGER ||
-            KIND == TypeKind::BIGINT,
+            KIND == TypeKind::BIGINT || KIND == TypeKind::HUGEINT,
         void>,
     TRUNCATE> {
   using T = typename TypeTraits<KIND>::NativeType;
 
   template <typename From>
   static T cast(const From& v, bool& nullOutput) {
-    VELOX_NYI();
+    VELOX_UNSUPPORTED(
+        "Conversion to {} is not supported", TypeTraits<KIND>::name);
   }
 
   static T convertStringToInt(const folly::StringPiece& v, bool& nullOutput) {
@@ -216,10 +218,14 @@ struct Converter<
       if (std::isnan(v)) {
         return 0;
       }
-      if (v > LimitType::maxLimit()) {
+      if constexpr (std::is_same_v<T, int128_t>) {
+        return std::numeric_limits<int128_t>::max();
+      } else if (v > LimitType::maxLimit()) {
         return LimitType::max();
       }
-      if (v < LimitType::minLimit()) {
+      if constexpr (std::is_same_v<T, int128_t>) {
+        return std::numeric_limits<int128_t>::min();
+      } else if (v < LimitType::minLimit()) {
         return LimitType::min();
       }
       return LimitType::cast(v);
@@ -236,10 +242,14 @@ struct Converter<
       if (std::isnan(v)) {
         return 0;
       }
-      if (v > LimitType::maxLimit()) {
+      if constexpr (std::is_same_v<T, int128_t>) {
+        return std::numeric_limits<int128_t>::max();
+      } else if (v > LimitType::maxLimit()) {
         return LimitType::max();
       }
-      if (v < LimitType::minLimit()) {
+      if constexpr (std::is_same_v<T, int128_t>) {
+        return std::numeric_limits<int128_t>::min();
+      } else if (v < LimitType::minLimit()) {
         return LimitType::min();
       }
       return LimitType::cast(v);
@@ -359,6 +369,15 @@ struct Converter<
 };
 
 template <bool TRUNCATE>
+struct Converter<TypeKind::VARBINARY, void, TRUNCATE> {
+  // Same semantics of TypeKind::VARCHAR converter.
+  template <typename T>
+  static std::string cast(const T& val, bool& nullOutput) {
+    return Converter<TypeKind::VARCHAR, void, TRUNCATE>::cast(val, nullOutput);
+  }
+};
+
+template <bool TRUNCATE>
 struct Converter<TypeKind::VARCHAR, void, TRUNCATE> {
   template <typename T>
   static std::string cast(const T& val, bool& nullOutput) {
@@ -374,6 +393,10 @@ struct Converter<TypeKind::VARCHAR, void, TRUNCATE> {
     return folly::to<std::string>(val);
   }
 
+  static std::string cast(const Timestamp& val, bool& nullOutput) {
+    return val.toString(Timestamp::Precision::kMilliseconds);
+  }
+
   static std::string cast(const bool& val, bool& nullOutput) {
     return val ? "true" : "false";
   }
@@ -386,7 +409,8 @@ struct Converter<TypeKind::TIMESTAMP> {
 
   template <typename From>
   static T cast(const From& /* v */, bool& nullOutput) {
-    VELOX_NYI();
+    VELOX_UNSUPPORTED("Conversion to Timestamp is not supported");
+    return T();
   }
 
   static T cast(folly::StringPiece v, bool& nullOutput) {
@@ -413,7 +437,8 @@ struct Converter<TypeKind::DATE, void, TRUNCATE> {
   using T = typename TypeTraits<TypeKind::DATE>::NativeType;
   template <typename From>
   static T cast(const From& /* v */, bool& nullOutput) {
-    VELOX_NYI();
+    VELOX_UNSUPPORTED("Conversion to Date is not supported");
+    return T();
   }
 
   static T cast(folly::StringPiece v, bool& nullOutput) {
@@ -430,7 +455,14 @@ struct Converter<TypeKind::DATE, void, TRUNCATE> {
 
   static T cast(const Timestamp& t, bool& nullOutput) {
     static const int32_t kSecsPerDay{86'400};
-    return Date(t.getSeconds() / kSecsPerDay);
+    auto seconds = t.getSeconds();
+    if (seconds >= 0 || seconds % kSecsPerDay == 0) {
+      return Date(seconds / kSecsPerDay);
+    }
+    // For division with negatives, minus 1 to compensate the discarded
+    // fractional part. e.g. -1/86'400 yields 0, yet it should be considered as
+    // -1 day.
+    return Date(seconds / kSecsPerDay - 1);
   }
 };
 

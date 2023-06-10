@@ -58,11 +58,10 @@ class VectorUtilTest : public testing::Test {
 
  protected:
   void SetUp() override {
-    pool_ = memoryManager_.getChild();
+    pool_ = memoryManager_.addLeafPool("VectorUtilTest");
   }
 
-  memory::MemoryManager<memory::MemoryAllocator, AlignedBuffer::kAlignment>
-      memoryManager_;
+  memory::MemoryManager memoryManager_;
   std::shared_ptr<memory::MemoryPool> pool_;
 };
 

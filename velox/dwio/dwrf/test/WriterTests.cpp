@@ -17,7 +17,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <stdexcept>
-#include "velox/dwio/common/MemoryInputStream.h"
 #include "velox/dwio/dwrf/reader/ReaderBase.h"
 #include "velox/dwio/dwrf/writer/WriterBase.h"
 #include "velox/dwio/type/fbhive/HiveTypeParser.h"
@@ -31,7 +30,7 @@ namespace facebook::velox::dwrf {
 
 class WriterTest : public Test {
  public:
-  WriterTest() : pool_(getDefaultMemoryPool()) {}
+  WriterTest() : pool_(addDefaultLeafMemoryPool("WriterTest")) {}
 
   WriterBase& createWriter(
       const std::shared_ptr<Config>& config,
@@ -42,8 +41,16 @@ class WriterTest : public Test {
       sink = std::move(memSink);
     }
     writer_ = std::make_unique<WriterBase>(std::move(sink));
-    writer_->initContext(config, pool_->addChild("test_writer_pool"));
+    writer_->initContext(
+        config, defaultMemoryManager().addRootPool("WriterTest"));
     return *writer_;
+  }
+
+  std::unique_ptr<ReaderBase> createReader() {
+    std::string_view data(sinkPtr_->getData(), sinkPtr_->size());
+    auto readFile = std::make_shared<InMemoryReadFile>(data);
+    auto input = std::make_unique<BufferedInput>(std::move(readFile), *pool_);
+    return std::make_unique<ReaderBase>(*pool_, std::move(input));
   }
 
   auto& getContext() {
@@ -109,9 +116,7 @@ TEST_F(WriterTest, WriteFooter) {
   writer.close();
 
   // deserialize and verify
-  auto input = std::make_unique<MemoryInputStream>(
-      sinkPtr_->getData(), sinkPtr_->size());
-  auto reader = std::make_unique<ReaderBase>(*pool_, std::move(input));
+  auto reader = createReader();
 
   auto& ps = reader->getPostScript();
   ASSERT_EQ(reader->getWriterVersion(), config->get(Config::WRITER_VERSION));
@@ -213,9 +218,7 @@ TEST_F(WriterTest, NoChecksum) {
   writer.close();
 
   // deserialize and verify
-  auto input = std::make_unique<MemoryInputStream>(
-      sinkPtr_->getData(), sinkPtr_->size());
-  auto reader = std::make_unique<ReaderBase>(*pool_, std::move(input));
+  auto reader = createReader();
   auto& footer = reader->getFooter();
   ASSERT_TRUE(footer.hasChecksumAlgorithm());
   ASSERT_EQ(footer.checksumAlgorithm(), proto::ChecksumAlgorithm::NULL_);
@@ -249,9 +252,7 @@ TEST_F(WriterTest, NoCache) {
   writer.close();
 
   // deserialize and verify
-  auto input = std::make_unique<MemoryInputStream>(
-      sinkPtr_->getData(), sinkPtr_->size());
-  auto reader = std::make_unique<ReaderBase>(*pool_, std::move(input));
+  auto reader = createReader();
   auto& footer = reader->getFooter();
   ASSERT_EQ(footer.stripeCacheOffsetsSize(), 0);
   auto& ps = reader->getPostScript();
@@ -326,14 +327,14 @@ class MockDataSink : public dwio::common::DataSink {
 
 TEST(WriterBaseTest, FlushWriterSinkUponClose) {
   auto config = std::make_shared<Config>();
-  auto pool = getDefaultMemoryPool();
+  auto pool = defaultMemoryManager().addRootPool("FlushWriterSinkUponClose");
   auto sink = std::make_unique<MockDataSink>();
   MockDataSink* sinkPtr = sink.get();
   EXPECT_CALL(*sinkPtr, write(_)).Times(1);
   EXPECT_CALL(*sinkPtr, isBuffered()).WillOnce(Return(false));
   {
     auto writer = std::make_unique<WriterBase>(std::move(sink));
-    writer->initContext(config, pool->addChild("test_writer_pool"));
+    writer->initContext(config, pool->addAggregateChild("test_writer_pool"));
     writer->close();
   }
 }

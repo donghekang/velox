@@ -36,6 +36,7 @@ class DwrfData : public dwio::common::FormatData {
   DwrfData(
       std::shared_ptr<const dwio::common::TypeWithId> nodeType,
       StripeStreams& stripe,
+      const StreamLabels& streamLabels,
       FlatMapContext flatMapContext);
 
   void readNulls(
@@ -50,17 +51,11 @@ class DwrfData : public dwio::common::FormatData {
     return skipNulls(numValues);
   }
 
-  std::vector<uint32_t> filterRowGroups(
+  void filterRowGroups(
       const common::ScanSpec& scanSpec,
       uint64_t rowsPerRowGroup,
-      const dwio::common::StatsContext& writerContext) override;
-
-  // TODO: Refactor filterRowGroups() and implement rowGroupMatches() for DWRF.
-  virtual bool rowGroupMatches(
-      uint32_t rowGroupId,
-      velox::common::Filter* FOLLY_NULLABLE filter) override {
-    VELOX_UNREACHABLE();
-  }
+      const dwio::common::StatsContext& writerContext,
+      FilterRowGroupsResult&) override;
 
   bool hasNulls() const override {
     return notNullDecoder_ != nullptr;
@@ -121,17 +116,20 @@ class DwrfData : public dwio::common::FormatData {
 // DWRF specific initialization.
 class DwrfParams : public dwio::common::FormatParams {
  public:
-  DwrfParams(
+  explicit DwrfParams(
       StripeStreams& stripeStreams,
-      FlatMapContext context = FlatMapContext::nonFlatMapContext())
+      const StreamLabels& streamLabels,
+      FlatMapContext context = {})
       : FormatParams(stripeStreams.getMemoryPool()),
         stripeStreams_(stripeStreams),
-        flatMapContext_(context) {}
+        flatMapContext_(context),
+        streamLabels_(streamLabels) {}
 
   std::unique_ptr<dwio::common::FormatData> toFormatData(
       const std::shared_ptr<const dwio::common::TypeWithId>& type,
       const common::ScanSpec& /*scanSpec*/) override {
-    return std::make_unique<DwrfData>(type, stripeStreams_, flatMapContext_);
+    return std::make_unique<DwrfData>(
+        type, stripeStreams_, streamLabels_, flatMapContext_);
   }
 
   StripeStreams& stripeStreams() {
@@ -142,9 +140,14 @@ class DwrfParams : public dwio::common::FormatParams {
     return flatMapContext_;
   }
 
+  const StreamLabels& streamLabels() const {
+    return streamLabels_;
+  }
+
  private:
   StripeStreams& stripeStreams_;
   FlatMapContext flatMapContext_;
+  const StreamLabels& streamLabels_;
 };
 
 inline RleVersion convertRleVersion(proto::ColumnEncoding_Kind kind) {

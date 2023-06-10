@@ -16,12 +16,15 @@
 
 #pragma once
 
+#include <limits>
 #include "velox/common/base/GTestMacros.h"
 #include "velox/common/time/CpuWallTimer.h"
+#include "velox/dwio/dwrf/common/Common.h"
 #include "velox/dwio/dwrf/common/Compression.h"
 #include "velox/dwio/dwrf/common/EncoderUtil.h"
 #include "velox/dwio/dwrf/writer/IndexBuilder.h"
 #include "velox/dwio/dwrf/writer/IntegerDictionaryEncoder.h"
+#include "velox/dwio/dwrf/writer/PhysicalSizeAggregator.h"
 #include "velox/dwio/dwrf/writer/RatioTracker.h"
 #include "velox/vector/DecodedVector.h"
 
@@ -39,9 +42,9 @@ class WriterContext : public CompressionBufferPool {
       std::unique_ptr<encryption::EncryptionHandler> handler = nullptr)
       : config_{config},
         pool_{std::move(pool)},
-        dictionaryPool_{pool_->addChild(".dictionary")},
-        outputStreamPool_{pool_->addChild(".compression")},
-        generalPool_{pool_->addChild(".general")},
+        dictionaryPool_{pool_->addLeafChild(".dictionary")},
+        outputStreamPool_{pool_->addLeafChild(".compression")},
+        generalPool_{pool_->addLeafChild(".general")},
         handler_{std::move(handler)},
         compression{getConfig(Config::COMPRESSION)},
         compressionBlockSize{getConfig(Config::COMPRESSION_BLOCK_SIZE)},
@@ -181,6 +184,7 @@ class WriterContext : public CompressionBufferPool {
 
   void nextStripe() {
     fileRowCount += stripeRowCount;
+    rowsPerStripe.push_back(stripeRowCount);
     stripeRowCount = 0;
     indexRowCount = 0;
     fileRawSize += stripeRawSize;
@@ -235,12 +239,12 @@ class WriterContext : public CompressionBufferPool {
         getMemoryUsage(MemoryUsageCategory::DICTIONARY);
     const auto& generalPool = getMemoryUsage(MemoryUsageCategory::GENERAL);
 
-    return outputStreamPool.getCurrentBytes() +
-        dictionaryPool.getCurrentBytes() + generalPool.getCurrentBytes();
+    return outputStreamPool.currentBytes() + dictionaryPool.currentBytes() +
+        generalPool.currentBytes();
   }
 
   int64_t getMemoryBudget() const {
-    return pool_->cap();
+    return pool_->capacity();
   }
 
   const encryption::EncryptionHandler& getEncryptionHandler() const {
@@ -325,7 +329,7 @@ class WriterContext : public CompressionBufferPool {
   void recordFlushOverhead(uint64_t flushOverhead) {
     flushOverheadRatioTracker_.takeSample(
         stripeRawSize +
-            getMemoryUsage(MemoryUsageCategory::DICTIONARY).getCurrentBytes(),
+            getMemoryUsage(MemoryUsageCategory::DICTIONARY).currentBytes(),
         flushOverhead);
   }
 
@@ -358,8 +362,8 @@ class WriterContext : public CompressionBufferPool {
 
   int64_t getEstimatedOutputStreamSize() const {
     return (int64_t)std::ceil(
-        (getMemoryUsage(MemoryUsageCategory::OUTPUT_STREAM).getCurrentBytes() +
-         getMemoryUsage(MemoryUsageCategory::DICTIONARY).getCurrentBytes()) /
+        (getMemoryUsage(MemoryUsageCategory::OUTPUT_STREAM).currentBytes() +
+         getMemoryUsage(MemoryUsageCategory::DICTIONARY).currentBytes()) /
         getConfig(Config::COMPRESSION_BLOCK_SIZE_EXTEND_RATIO));
   }
 
@@ -382,6 +386,72 @@ class WriterContext : public CompressionBufferPool {
 
   bool isLowMemoryMode() const {
     return lowMemoryMode_;
+  }
+
+  PhysicalSizeAggregator& getPhysicalSizeAggregator(uint32_t node) {
+    return *physicalSizeAggregators_.at(node);
+  }
+
+  void recordPhysicalSize(const DwrfStreamIdentifier& streamId, uint64_t size) {
+    auto& agg = getPhysicalSizeAggregator(streamId.encodingKey().node);
+    agg.recordSize(streamId, size);
+  }
+
+  void buildPhysicalSizeAggregators(
+      const velox::dwio::common::TypeWithId& type,
+      PhysicalSizeAggregator* parent = nullptr) {
+    switch (type.type->kind()) {
+      case TypeKind::ROW: {
+        physicalSizeAggregators_.emplace(
+            type.id, std::make_unique<PhysicalSizeAggregator>(parent));
+        auto current = physicalSizeAggregators_.at(type.id).get();
+        for (auto& child : type.getChildren()) {
+          buildPhysicalSizeAggregators(*child, current);
+        }
+        break;
+      }
+      case TypeKind::MAP: {
+        // MapPhysicalSizeAggregator is only required for flatmaps, but it will
+        // behave just fine as a regular PhysicalSizeAggregator.
+        physicalSizeAggregators_.emplace(
+            type.id, std::make_unique<MapPhysicalSizeAggregator>(parent));
+        auto current = physicalSizeAggregators_.at(type.id).get();
+        buildPhysicalSizeAggregators(*type.childAt(0), current);
+        buildPhysicalSizeAggregators(*type.childAt(1), current);
+        break;
+      }
+      case TypeKind::ARRAY: {
+        physicalSizeAggregators_.emplace(
+            type.id, std::make_unique<PhysicalSizeAggregator>(parent));
+        auto current = physicalSizeAggregators_.at(type.id).get();
+        buildPhysicalSizeAggregators(*type.childAt(0), current);
+        break;
+      }
+      case TypeKind::BOOLEAN:
+      case TypeKind::TINYINT:
+      case TypeKind::SMALLINT:
+      case TypeKind::INTEGER:
+      case TypeKind::BIGINT:
+      case TypeKind::HUGEINT:
+      case TypeKind::REAL:
+      case TypeKind::DOUBLE:
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY:
+      case TypeKind::TIMESTAMP:
+      case TypeKind::DATE:
+        physicalSizeAggregators_.emplace(
+            type.id, std::make_unique<PhysicalSizeAggregator>(parent));
+        break;
+      case TypeKind::UNKNOWN:
+      case TypeKind::FUNCTION:
+      case TypeKind::OPAQUE:
+      case TypeKind::INVALID:
+        VELOX_FAIL(fmt::format(
+            "Unexpected type kind {} encountered when building "
+            "physical size aggregator for node {}.",
+            type.type->toString(),
+            type.id));
+    }
   }
 
   class LocalDecodedVector {
@@ -450,6 +520,8 @@ class WriterContext : public CompressionBufferPool {
       DataBufferHolder,
       dwio::common::StreamIdentifierHash>
       streams_;
+  folly::F14NodeMap<uint32_t, std::unique_ptr<PhysicalSizeAggregator>>
+      physicalSizeAggregators_;
   folly::F14FastMap<
       EncodingKey,
       std::unique_ptr<AbstractIntegerDictionaryEncoder>,
@@ -481,6 +553,7 @@ class WriterContext : public CompressionBufferPool {
   uint64_t fileRowCount = 0;
   uint64_t stripeRowCount = 0;
   uint32_t indexRowCount = 0;
+  std::vector<uint64_t> rowsPerStripe{};
 
   uint64_t fileRawSize = 0;
   uint64_t stripeRawSize = 0;

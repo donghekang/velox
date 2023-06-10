@@ -11,9 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 add_library(
   velox_functions_spark
   ArraySort.cpp
+  Bitwise.cpp
   CompareFunctionsNullSafe.cpp
   Hash.cpp
   In.cpp
@@ -25,19 +27,32 @@ add_library(
   RegisterCompare.cpp
   Size.cpp
   SplitFunctions.cpp
-  String.cpp
-  Subscript.cpp)
+  String.cpp)
+
+# GCC 12 has a bug where it does not respect "pragma ignore" directives and ends
+# up failing compilation in an openssl header included by a hash-related
+# function.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_compile_options(velox_functions_spark
+                         PRIVATE -Wno-deprecated-declarations)
+endif()
 
 target_link_libraries(
   velox_functions_spark velox_functions_lib velox_functions_prestosql_impl
-  velox_is_null_functions velox_functions_util ${FOLLY_WITH_DEPENDENCIES})
+  velox_is_null_functions velox_functions_util Folly::folly)
 
 set_property(TARGET velox_functions_spark PROPERTY JOB_POOL_COMPILE
                                                    high_memory_pool)
 
+add_subdirectory(window)
+
+if(${VELOX_ENABLE_AGGREGATES})
+  add_subdirectory(aggregates)
+endif()
+
 if(${VELOX_BUILD_TESTING})
   add_subdirectory(tests)
-  add_subdirectory(aggregates)
+  add_subdirectory(coverage)
 endif()
 
 if(${VELOX_ENABLE_BENCHMARKS})

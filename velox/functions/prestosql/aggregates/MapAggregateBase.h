@@ -47,13 +47,6 @@ class MapAggregateBase : public exec::Aggregate {
     setAllNulls(groups, indices);
   }
 
-  void finalize(char** groups, int32_t numGroups) override {
-    for (auto i = 0; i < numGroups; i++) {
-      value<MapAccumulator>(groups[i])->keys.finalize(allocator_);
-      value<MapAccumulator>(groups[i])->values.finalize(allocator_);
-    }
-  }
-
   void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
       override;
 

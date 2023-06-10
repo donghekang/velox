@@ -22,6 +22,8 @@
 #include <optional>
 #include <string_view>
 #include <type_traits>
+#include <typeindex>
+#include <typeinfo>
 #include <utility>
 
 #include "velox/expression/ComplexViewTypes.h"
@@ -697,7 +699,52 @@ struct VectorReader<Generic<T>> {
   // Those two variables are mutated by the GenericView during cast operations,
   // and are shared across GenericViews constructed by the reader.
   mutable std::array<std::shared_ptr<void>, 3> castReaders_;
-  mutable TypePtr castType_ = nullptr;
+  mutable std::optional<const std::type_info*> castType_ = std::nullopt;
+};
+
+template <>
+struct VectorReader<DynamicRow> {
+  using in_vector_t = RowVector;
+  using exec_in_t = DynamicRowView<true>;
+  using exec_null_free_in_t = DynamicRowView<false>;
+
+  explicit VectorReader(const DecodedVector* decoded)
+      : decoded_(*decoded),
+        vector_(detail::getDecoded<in_vector_t>(decoded_)),
+        childrenDecoders_{vector_.childrenSize()} {
+    for (int i = 0; i < vector_.childrenSize(); i++) {
+      childReaders_.push_back(std::make_unique<VectorReader<Any>>(
+          detail::decode(childrenDecoders_[i], *vector_.childAt(i))));
+    }
+  }
+
+  exec_in_t operator[](size_t offset) const {
+    auto index = decoded_.index(offset);
+    return {&childReaders_, index};
+  }
+
+  exec_null_free_in_t readNullFree(size_t offset) const {
+    auto index = decoded_.index(offset);
+    return {&childReaders_, index};
+  }
+
+  bool isSet(size_t offset) const {
+    return !decoded_.isNullAt(offset);
+  }
+
+  bool mayHaveNulls() const {
+    return decoded_.mayHaveNulls();
+  }
+
+  const BaseVector* baseVector() const {
+    return decoded_.base();
+  }
+
+ private:
+  const DecodedVector& decoded_;
+  const in_vector_t& vector_;
+  std::vector<DecodedVector> childrenDecoders_;
+  std::vector<std::unique_ptr<VectorReader<Any>>> childReaders_;
 };
 
 template <typename T>

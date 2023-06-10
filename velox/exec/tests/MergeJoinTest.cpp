@@ -30,14 +30,12 @@ class MergeJoinTest : public HiveConnectorTestBase {
       const std::shared_ptr<const core::PlanNode>& planNode,
       uint32_t preferredOutputBatchSize) {
     auto queryCtx = std::make_shared<core::QueryCtx>(executor_.get());
-    queryCtx->setConfigOverridesUnsafe(
-        {{core::QueryConfig::kCreateEmptyFiles, "true"}});
 
     CursorParameters params;
     params.planNode = planNode;
     params.queryCtx = queryCtx;
-    params.queryCtx->setConfigOverridesUnsafe(
-        {{core::QueryConfig::kPreferredOutputBatchSize,
+    params.queryCtx->testingOverrideConfigUnsafe(
+        {{core::QueryConfig::kPreferredOutputBatchRows,
           std::to_string(preferredOutputBatchSize)}});
     return params;
   }
@@ -458,7 +456,7 @@ TEST_F(MergeJoinTest, lazyVectors) {
        makeFlatVector<int64_t>(30'000, [](auto row) { return row % 23; }),
        makeFlatVector<int32_t>(30'000, [](auto row) { return row % 31; }),
        makeFlatVector<StringView>(30'000, [](auto row) {
-         return StringView(fmt::format("{}   string", row % 43));
+         return StringView::makeInline(fmt::format("{}   string", row % 43));
        })});
 
   auto rightVectors = makeRowVector(

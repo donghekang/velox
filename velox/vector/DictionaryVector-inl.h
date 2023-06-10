@@ -82,7 +82,7 @@ DictionaryVector<T>::DictionaryVector(
     velox::memory::MemoryPool* pool,
     BufferPtr nulls,
     size_t length,
-    std::shared_ptr<BaseVector> dictionaryValues,
+    VectorPtr dictionaryValues,
     BufferPtr dictionaryIndices,
     const SimpleVectorStats<T>& stats,
     std::optional<vector_size_t> distinctValueCount,
@@ -163,6 +163,7 @@ std::unique_ptr<SimpleVector<uint64_t>> DictionaryVector<T>::hashAll() const {
   }
   return std::make_unique<FlatVector<uint64_t>>(
       BaseVector::pool_,
+      BIGINT(),
       BufferPtr(nullptr),
       BaseVector::length_,
       hashes,

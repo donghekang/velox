@@ -68,7 +68,7 @@ class ExtremeValueFunction : public exec::VectorFunction {
       exec::EvalCtx& context,
       VectorPtr& result) const {
     context.ensureWritable(rows, outputType, result);
-    result->clearAllNulls();
+    result->clearNulls(rows);
     BufferPtr resultValues =
         result->as<FlatVector<T>>()->mutableValues(rows.end());
     T* __restrict rawResult = resultValues->asMutable<T>();
@@ -76,7 +76,7 @@ class ExtremeValueFunction : public exec::VectorFunction {
     exec::DecodedArgs decodedArgs(rows, args, context);
 
     std::set<size_t> usedInputs;
-    rows.applyToSelected([&](int row) {
+    context.applyToSelectedNoThrow(rows, [&](int row) {
       size_t valueIndex = 0;
 
       T currentValue = decodedArgs.at(0)->valueAt<T>(row);
@@ -112,8 +112,28 @@ class ExtremeValueFunction : public exec::VectorFunction {
       exec::EvalCtx& context,
       VectorPtr& result) const override {
     switch (outputType.get()->kind()) {
+      case TypeKind::TINYINT:
+        applyTyped<TypeTraits<TypeKind::TINYINT>::NativeType>(
+            rows, args, outputType, context, result);
+        return;
+      case TypeKind::SMALLINT:
+        applyTyped<TypeTraits<TypeKind::SMALLINT>::NativeType>(
+            rows, args, outputType, context, result);
+        return;
+      case TypeKind::INTEGER:
+        applyTyped<TypeTraits<TypeKind::INTEGER>::NativeType>(
+            rows, args, outputType, context, result);
+        return;
       case TypeKind::BIGINT:
         applyTyped<TypeTraits<TypeKind::BIGINT>::NativeType>(
+            rows, args, outputType, context, result);
+        return;
+      case TypeKind::HUGEINT:
+        applyTyped<TypeTraits<TypeKind::HUGEINT>::NativeType>(
+            rows, args, outputType, context, result);
+        return;
+      case TypeKind::REAL:
+        applyTyped<TypeTraits<TypeKind::REAL>::NativeType>(
             rows, args, outputType, context, result);
         return;
       case TypeKind::DOUBLE:
@@ -142,7 +162,15 @@ class ExtremeValueFunction : public exec::VectorFunction {
 
   static std::vector<std::shared_ptr<exec::FunctionSignature>> signatures() {
     std::vector<std::string> types = {
-        "bigint", "double", "varchar", "timestamp", "date"};
+        "tinyint",
+        "smallint",
+        "integer",
+        "bigint",
+        "double",
+        "real",
+        "varchar",
+        "timestamp",
+        "date"};
     std::vector<std::shared_ptr<exec::FunctionSignature>> signatures;
     for (const auto& type : types) {
       signatures.emplace_back(exec::FunctionSignatureBuilder()
@@ -151,6 +179,13 @@ class ExtremeValueFunction : public exec::VectorFunction {
                                   .variableArity()
                                   .build());
     }
+    signatures.emplace_back(exec::FunctionSignatureBuilder()
+                                .integerVariable("precision")
+                                .integerVariable("scale")
+                                .returnType("DECIMAL(precision, scale)")
+                                .argumentType("DECIMAL(precision, scale)")
+                                .variableArity()
+                                .build());
     return signatures;
   }
 };
@@ -163,7 +198,7 @@ VELOX_DECLARE_VECTOR_FUNCTION(
 
 VELOX_DECLARE_VECTOR_FUNCTION(
     udf_greatest,
-    GreatestFunction ::signatures(),
+    GreatestFunction::signatures(),
     std::make_unique<GreatestFunction>());
 
 } // namespace facebook::velox::functions

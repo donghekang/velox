@@ -16,8 +16,11 @@
 #include <folly/Unit.h>
 #include <folly/init/Init.h>
 #include <velox/exec/Driver.h>
+#include "folly/experimental/EventCount.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/common/testutil/TestValue.h"
 #include "velox/dwio/common/tests/utils/BatchMaker.h"
+#include "velox/exec/Values.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/Cursor.h"
 #include "velox/exec/tests/utils/OperatorTestBase.h"
@@ -27,6 +30,7 @@ using namespace facebook::velox;
 using namespace facebook::velox::exec;
 using namespace facebook::velox::exec::test;
 
+using namespace facebook::velox::common::testutil;
 using facebook::velox::test::BatchMaker;
 
 // A PlanNode that passes its input to its output and makes variable
@@ -73,6 +77,7 @@ class DriverTest : public OperatorTestBase {
 
   void SetUp() override {
     OperatorTestBase::SetUp();
+    Operator::unregisterAllOperators();
     rowType_ =
         ROW({"key", "m1", "m2", "m3", "m4", "m5", "m6", "m7"},
             {BIGINT(),
@@ -167,7 +172,8 @@ class DriverTest : public OperatorTestBase {
       // To be realized either after 1s wall time or when the corresponding Task
       // is no longer running.
       auto& executor = folly::QueuedImmediateExecutor::instance();
-      auto future = tasks_.back()->stateChangeFuture(1'000'000).via(&executor);
+      auto future =
+          tasks_.back()->taskCompletionFuture(1'000'000).via(&executor);
       stateFutures_.emplace(threadId, std::move(future));
 
       EXPECT_FALSE(stateFutures_.at(threadId).isReady());
@@ -199,10 +205,15 @@ class DriverTest : public OperatorTestBase {
         } else if (operation == ResultOperation::kTerminate) {
           cancelFuture_ = cursor->task()->requestAbort();
         } else if (operation == ResultOperation::kYield) {
-          cursor->task()->requestYield();
+          if (*counter % 2 == 0) {
+            auto time = getCurrentTimeMicro();
+            cursor->task()->yieldIfDue(time - 10);
+          } else {
+            cursor->task()->requestYield();
+          }
         } else if (operation == ResultOperation::kPause) {
           auto& executor = folly::QueuedImmediateExecutor::instance();
-          auto future = cursor->task()->requestPause(true).via(&executor);
+          auto future = cursor->task()->requestPause().via(&executor);
           future.wait();
           paused = true;
         }
@@ -235,6 +246,97 @@ class DriverTest : public OperatorTestBase {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     FAIL() << file << ":" << line << " " << message << "not realized within 1s";
+  }
+
+  std::shared_ptr<Task> createAndStartTaskToReadValues(int numDrivers) {
+    std::vector<RowVectorPtr> batches;
+    for (int i = 0; i < 4; ++i) {
+      batches.push_back(
+          makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})}));
+    }
+    auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
+    auto plan =
+        PlanBuilder(planNodeIdGenerator).values(batches, true).planFragment();
+    auto task = Task::create(
+        "t0",
+        plan,
+        0,
+        std::make_shared<core::QueryCtx>(driverExecutor_.get()),
+        [](RowVectorPtr /*unused*/, ContinueFuture* /*unused*/) {
+          return exec::BlockingReason::kNotBlocked;
+        });
+    task->start(task, numDrivers, 1);
+    return task;
+  }
+
+  void testDriverSuspensionWithTaskOperationRace(
+      int numDrivers,
+      StopReason expectedEnterSuspensionStopReason,
+      StopReason expectedLeaveSuspensionStopReason,
+      TaskState expectedTaskState,
+      std::function<void(Task*)> preSuspensionTaskFunc = nullptr,
+      std::function<void(Task*)> inSuspensionTaskFunc = nullptr,
+      std::function<void(Task*)> leaveSuspensionTaskFunc = nullptr) {
+    folly::EventCount driverExecutionWait;
+    auto driverExecutionWaitKey = driverExecutionWait.prepareWait();
+    folly::EventCount enterSuspensionWait;
+    auto enterSuspensionKey = enterSuspensionWait.prepareWait();
+    folly::EventCount suspensionNotify;
+    auto suspensionNotifyKey = suspensionNotify.prepareWait();
+    folly::EventCount leaveSuspensionWait;
+    auto leaveSuspensionKey = leaveSuspensionWait.prepareWait();
+    folly::EventCount leaveSuspensionNotify;
+    auto leaveSuspensionNotifyKey = leaveSuspensionNotify.prepareWait();
+
+    std::atomic<bool> injectSuspension{true};
+    SCOPED_TESTVALUE_SET(
+        "facebook::velox::exec::Values::getOutput",
+        std::function<void(const exec::Values*)>(
+            ([&](const exec::Values* values) {
+              driverExecutionWait.notify();
+              if (!injectSuspension.exchange(false)) {
+                return;
+              }
+              auto* driver = values->testingOperatorCtx()->driver();
+              enterSuspensionWait.wait(enterSuspensionKey);
+              ASSERT_EQ(
+                  driver->task()->enterSuspended(driver->state()),
+                  expectedEnterSuspensionStopReason);
+              suspensionNotify.notify();
+              leaveSuspensionWait.wait(leaveSuspensionKey);
+              ASSERT_EQ(
+                  driver->task()->leaveSuspended(driver->state()),
+                  expectedLeaveSuspensionStopReason);
+              leaveSuspensionNotify.notify();
+            })));
+
+    auto task = createAndStartTaskToReadValues(numDrivers);
+
+    driverExecutionWait.wait(driverExecutionWaitKey);
+
+    if (preSuspensionTaskFunc != nullptr) {
+      preSuspensionTaskFunc(task.get());
+    }
+    enterSuspensionWait.notify();
+
+    suspensionNotify.wait(suspensionNotifyKey);
+    if (inSuspensionTaskFunc != nullptr) {
+      inSuspensionTaskFunc(task.get());
+    }
+    leaveSuspensionWait.notify();
+
+    // NOTE: this callback is executed in par with driver suspension leave.
+    if (leaveSuspensionTaskFunc != nullptr) {
+      leaveSuspensionTaskFunc(task.get());
+    }
+    leaveSuspensionNotify.wait(leaveSuspensionNotifyKey);
+    if (expectedTaskState == TaskState::kFinished) {
+      ASSERT_TRUE(waitForTaskCompletion(task.get(), 1000'000'000));
+    } else if (expectedTaskState == TaskState::kCanceled) {
+      ASSERT_TRUE(waitForTaskCancelled(task.get(), 1000'000'000));
+    } else {
+      ASSERT_TRUE(waitForTaskAborted(task.get(), 1000'000'000));
+    }
   }
 
  public:
@@ -346,7 +448,7 @@ TEST_F(DriverTest, error) {
   EXPECT_EQ(numRead, 0);
   EXPECT_TRUE(stateFutures_.at(0).isReady());
   // Realized immediately since task not running.
-  EXPECT_TRUE(tasks_[0]->stateChangeFuture(1'000'000).isReady());
+  EXPECT_TRUE(tasks_[0]->taskCompletionFuture(1'000'000).isReady());
   EXPECT_EQ(tasks_[0]->state(), TaskState::kFailed);
 }
 
@@ -368,7 +470,7 @@ TEST_F(DriverTest, cancel) {
   }
   EXPECT_GE(numRead, 1'000'000);
   auto& executor = folly::QueuedImmediateExecutor::instance();
-  auto future = tasks_[0]->stateChangeFuture(1'000'000).via(&executor);
+  auto future = tasks_[0]->taskCompletionFuture(1'000'000).via(&executor);
   future.wait();
   EXPECT_TRUE(stateFutures_.at(0).isReady());
 
@@ -421,7 +523,7 @@ TEST_F(DriverTest, slow) {
   // are updated some tens of instructions after this. Determinism
   // requires a barrier.
   auto& executor = folly::QueuedImmediateExecutor::instance();
-  auto future = tasks_[0]->stateChangeFuture(1'000'000).via(&executor);
+  auto future = tasks_[0]->taskCompletionFuture(1'000'000).via(&executor);
   future.wait();
   // Note that the driver count drops after the last thread stops and
   // realizes the future.
@@ -448,17 +550,16 @@ TEST_F(DriverTest, pause) {
       [](int64_t num) { return num % 10 > 0; },
       &hits);
   params.maxDrivers = 10;
-  params.queryCtx = std::make_shared<core::QueryCtx>(
-      executor_.get(),
-      // Make sure CPU usage tracking is enabled.
-      std::make_shared<core::MemConfig>(
-          std::unordered_map<std::string, std::string>{
-              {core::QueryConfig::kOperatorTrackCpuUsage, "true"}}));
+  // Make sure CPU usage tracking is enabled.
+  std::unordered_map<std::string, std::string> queryConfig{
+      {core::QueryConfig::kOperatorTrackCpuUsage, "true"}};
+  params.queryCtx =
+      std::make_shared<core::QueryCtx>(executor_.get(), std::move(queryConfig));
   int32_t numRead = 0;
   readResults(params, ResultOperation::kPause, 370'000'000, &numRead);
   // Each thread will fully read the 1M rows in values.
   EXPECT_EQ(numRead, 10 * hits);
-  auto stateFuture = tasks_[0]->stateChangeFuture(100'000'000);
+  auto stateFuture = tasks_[0]->taskCompletionFuture(100'000'000);
   auto& executor = folly::QueuedImmediateExecutor::instance();
   auto state = std::move(stateFuture).via(&executor);
   state.wait();
@@ -573,7 +674,7 @@ class TestingPauser : public Operator {
             continue;
           }
           auto& executor = folly::QueuedImmediateExecutor::instance();
-          auto future = task->requestPause(true).via(&executor);
+          auto future = task->requestPause().via(&executor);
           future.wait();
           sleep(2);
           Task::resume(task);
@@ -672,10 +773,9 @@ TEST_F(DriverTest, pauserNode) {
       kThreadsPerTask, sequence, testInstance));
 
   std::vector<CursorParameters> params(kNumTasks);
-  int32_t hits;
+  int32_t hits{0};
   for (int32_t i = 0; i < kNumTasks; ++i) {
-    params[i].queryCtx = std::make_shared<core::QueryCtx>(
-        executor.get(), std::make_shared<core::MemConfig>());
+    params[i].queryCtx = std::make_shared<core::QueryCtx>(executor.get());
     params[i].planNode = makeValuesFilterProject(
         rowType_,
         "m1 % 10 > 0",
@@ -713,11 +813,24 @@ namespace {
 // Custom node for the custom factory.
 class ThrowNode : public core::PlanNode {
  public:
-  ThrowNode(const core::PlanNodeId& id, core::PlanNodePtr input)
-      : PlanNode(id), sources_{input} {}
+  enum class OperatorMethod {
+    kAddInput,
+    kNoMoreInput,
+    kGetOutput,
+  };
+
+  ThrowNode(
+      const core::PlanNodeId& id,
+      OperatorMethod throwingMethod,
+      core::PlanNodePtr input)
+      : PlanNode(id), throwingMethod_{throwingMethod}, sources_{input} {}
 
   const RowTypePtr& outputType() const override {
     return sources_[0]->outputType();
+  }
+
+  OperatorMethod throwingMethod() const {
+    return throwingMethod_;
   }
 
   const std::vector<std::shared_ptr<const PlanNode>>& sources() const override {
@@ -731,28 +844,59 @@ class ThrowNode : public core::PlanNode {
  private:
   void addDetails(std::stringstream& /* stream */) const override {}
 
+  const OperatorMethod throwingMethod_;
   std::vector<core::PlanNodePtr> sources_;
 };
 
 // Custom operator for the custom factory.
 class ThrowOperator : public Operator {
  public:
-  ThrowOperator(DriverCtx* ctx, int32_t id, core::PlanNodePtr node)
-      : Operator(ctx, node->outputType(), id, node->id(), "Throw") {}
+  ThrowOperator(
+      DriverCtx* ctx,
+      int32_t id,
+      const std::shared_ptr<const ThrowNode>& node)
+      : Operator(ctx, node->outputType(), id, node->id(), "Throw"),
+        throwingMethod_{node->throwingMethod()} {}
 
   bool needsInput() const override {
     return !noMoreInput_ && !input_;
   }
 
   void addInput(RowVectorPtr input) override {
+    if (throwingMethod_ == ThrowNode::OperatorMethod::kAddInput) {
+      // Trigger a std::bad_function_call exception.
+      std::function<bool(vector_size_t)> nullFunction = nullptr;
+
+      if (nullFunction(input->size())) {
+        input_ = std::move(input);
+      }
+    }
+
     input_ = std::move(input);
   }
 
   void noMoreInput() override {
+    if (throwingMethod_ == ThrowNode::OperatorMethod::kNoMoreInput) {
+      // Trigger a std::bad_function_call exception.
+      std::function<bool()> nullFunction = nullptr;
+
+      if (nullFunction()) {
+        Operator::noMoreInput();
+      }
+    }
+
     Operator::noMoreInput();
   }
 
   RowVectorPtr getOutput() override {
+    if (throwingMethod_ == ThrowNode::OperatorMethod::kGetOutput) {
+      // Trigger a std::bad_function_call exception.
+      std::function<bool()> nullFunction = nullptr;
+
+      if (nullFunction()) {
+        return std::move(input_);
+      }
+    }
     return std::move(input_);
   }
 
@@ -763,21 +907,24 @@ class ThrowOperator : public Operator {
   bool isFinished() override {
     return noMoreInput_ && input_ == nullptr;
   }
+
+ private:
+  const ThrowNode::OperatorMethod throwingMethod_;
 };
 
 // Custom factory that throws during driver creation.
 class ThrowNodeFactory : public Operator::PlanNodeTranslator {
  public:
-  ThrowNodeFactory() = default;
+  explicit ThrowNodeFactory(uint32_t maxDrivers) : maxDrivers_{maxDrivers} {}
 
   std::unique_ptr<Operator> toOperator(
       DriverCtx* ctx,
       int32_t id,
       const core::PlanNodePtr& node) override {
-    if (std::dynamic_pointer_cast<const ThrowNode>(node)) {
-      VELOX_CHECK_EQ(driversCreated, 0, "Can only create 1 'throw driver'.");
+    if (auto throwNode = std::dynamic_pointer_cast<const ThrowNode>(node)) {
+      VELOX_CHECK_LT(driversCreated, maxDrivers_, "Too many drivers");
       ++driversCreated;
-      return std::make_unique<ThrowOperator>(ctx, id, node);
+      return std::make_unique<ThrowOperator>(ctx, id, throwNode);
     }
     return nullptr;
   }
@@ -790,6 +937,7 @@ class ThrowNodeFactory : public Operator::PlanNodeTranslator {
   }
 
  private:
+  const uint32_t maxDrivers_;
   uint32_t driversCreated{0};
 };
 
@@ -799,27 +947,338 @@ class ThrowNodeFactory : public Operator::PlanNodeTranslator {
 // This is to test that we do not crash due to early driver destruction and we
 // have a proper error being propagated out.
 TEST_F(DriverTest, driverCreationThrow) {
-  Operator::registerOperator(std::make_unique<ThrowNodeFactory>());
+  Operator::registerOperator(std::make_unique<ThrowNodeFactory>(1));
 
-  auto rows = makeRowVector({"c0"}, {makeFlatVector<int32_t>({1, 2, 3})});
+  auto rows = makeRowVector({makeFlatVector<int32_t>({1, 2, 3})});
 
-  auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-
-  auto plan = PlanBuilder(planNodeIdGenerator)
+  auto plan = PlanBuilder()
                   .values({rows}, true)
                   .addNode([](std::string id, core::PlanNodePtr input) {
-                    return std::make_shared<ThrowNode>(id, input);
+                    return std::make_shared<ThrowNode>(
+                        id, ThrowNode::OperatorMethod::kAddInput, input);
                   })
                   .planNode();
 
   // Ensure execution threw correct error.
   VELOX_ASSERT_THROW(
-      AssertQueryBuilder(plan).maxDrivers(5).copyResults(pool()),
-      "Can only create 1 'throw driver'.");
+      AssertQueryBuilder(plan).maxDrivers(2).copyResults(pool()),
+      "Too many drivers");
 }
 
-int main(int argc, char** argv) {
-  testing::InitGoogleTest(&argc, argv);
-  folly::init(&argc, &argv, false);
-  return RUN_ALL_TESTS();
+TEST_F(DriverTest, nonVeloxOperatorException) {
+  Operator::registerOperator(
+      std::make_unique<ThrowNodeFactory>(std::numeric_limits<uint32_t>::max()));
+
+  auto rows = makeRowVector({makeFlatVector<int32_t>({1, 2, 3})});
+
+  auto makePlan = [&](ThrowNode::OperatorMethod throwingMethod) {
+    return PlanBuilder()
+        .values({rows}, true)
+        .addNode([throwingMethod](std::string id, core::PlanNodePtr input) {
+          return std::make_shared<ThrowNode>(id, throwingMethod, input);
+        })
+        .planNode();
+  };
+
+  VELOX_ASSERT_THROW(
+      AssertQueryBuilder(makePlan(ThrowNode::OperatorMethod::kAddInput))
+          .copyResults(pool()),
+      "Operator::addInput failed for [operator: Throw, plan node ID: 1]");
+
+  VELOX_ASSERT_THROW(
+      AssertQueryBuilder(makePlan(ThrowNode::OperatorMethod::kNoMoreInput))
+          .copyResults(pool()),
+      "Operator::noMoreInput failed for [operator: Throw, plan node ID: 1]");
+
+  VELOX_ASSERT_THROW(
+      AssertQueryBuilder(makePlan(ThrowNode::OperatorMethod::kGetOutput))
+          .copyResults(pool()),
+      "Operator::getOutput failed for [operator: Throw, plan node ID: 1]");
+}
+
+DEBUG_ONLY_TEST_F(DriverTest, driverSuspensionRaceWithTaskPause) {
+  struct {
+    int numDrivers;
+    bool enterSuspensionAfterPauseStarted;
+    bool leaveSuspensionDuringPause;
+
+    std::string debugString() const {
+      return fmt::format(
+          "numDrivers:{} enterSuspensionAfterPauseStarted:{} leaveSuspensionDuringPause:{}",
+          numDrivers,
+          enterSuspensionAfterPauseStarted,
+          leaveSuspensionDuringPause);
+    }
+  } testSettings[] = {
+      // This test case (1) uses TestValue to block one of the task driver
+      // threads when it processes the input values; (2) pauses the task; (3)
+      // enters suspension from the blocked driver thread; (4) tries to leave
+      // the suspension from the blocked driver thread while the task is paused
+      // and expects the suspension leave is busy waiting; (5) resumes the task
+      // and expects the task to complete successfully.
+      {1, true, true},
+      // The same as above with different number of driver threads.
+      {4, true, true},
+      // This test case (1) uses TestValue to block one of the task driver
+      // threads when it processes the input values; (2) enters suspension from
+      // the blocked driver thread; (3) pauses the task; (4) tries to leave the
+      // suspension from the blocked driver thread while the task is paused and
+      // expects the suspension leave is busy waiting; (5) resumes the task and
+      // expects the task to complete successfully.
+      {1, false, true},
+      // The same as above with different number of driver threads.
+      {4, false, true},
+      // This test case (1) uses TestValue to block one of the task driver
+      // threads when it processes the input values; (2) enters suspension from
+      // the blocked driver thread; (3) resumes the task; (4) leaves the
+      // suspension from the blocked driver thread and expects the task to
+      // complete successfully.
+      {1, false, false},
+      // The same as above with different number of driver threads.
+      {4, false, false},
+      // This test case (1) uses TestValue to block one of the task driver
+      // threads when it processes the input values; (2) pauses the task; (3)
+      // enters suspension from the blocked driver thread; (4) resumes the task;
+      // (5) leaves the suspension from the blocked driver thread and expects
+      // the task to complete
+      {1, true, false},
+      // The same as above with different number of driver threads.
+      {4, true, false}};
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.debugString());
+
+    std::shared_ptr<Task> task;
+    if (testData.enterSuspensionAfterPauseStarted &&
+        testData.leaveSuspensionDuringPause) {
+      testDriverSuspensionWithTaskOperationRace(
+          testData.numDrivers,
+          StopReason::kNone,
+          StopReason::kNone,
+          TaskState::kFinished,
+          [&](Task* task) { task->requestPause(); },
+          [&](Task* task) { task->requestPause().wait(); },
+          [&](Task* task) {
+            // Let the suspension leave thread to run first.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            bool hasSuspendedDriver{false};
+            task->testingVisitDrivers([&](Driver* driver) {
+              hasSuspendedDriver |= driver->state().isSuspended;
+            });
+            ASSERT_TRUE(hasSuspendedDriver);
+            Task::resume(task->shared_from_this());
+          });
+    } else if (
+        testData.enterSuspensionAfterPauseStarted &&
+        !testData.leaveSuspensionDuringPause) {
+      testDriverSuspensionWithTaskOperationRace(
+          testData.numDrivers,
+          StopReason::kNone,
+          StopReason::kNone,
+          TaskState::kFinished,
+          [&](Task* task) { task->requestPause(); },
+          [&](Task* task) {
+            task->requestPause().wait();
+            Task::resume(task->shared_from_this());
+          });
+    } else if (
+        !testData.enterSuspensionAfterPauseStarted &&
+        testData.leaveSuspensionDuringPause) {
+      testDriverSuspensionWithTaskOperationRace(
+          testData.numDrivers,
+          StopReason::kNone,
+          StopReason::kNone,
+          TaskState::kFinished,
+          nullptr,
+          [&](Task* task) { task->requestPause().wait(); },
+          [&](Task* task) {
+            // Let the suspension leave thread to run first.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            bool hasSuspendedDriver{false};
+            task->testingVisitDrivers([&](Driver* driver) {
+              hasSuspendedDriver |= driver->state().isSuspended;
+            });
+            ASSERT_TRUE(hasSuspendedDriver);
+            Task::resume(task->shared_from_this());
+          });
+    } else {
+      testDriverSuspensionWithTaskOperationRace(
+          testData.numDrivers,
+          StopReason::kNone,
+          StopReason::kNone,
+          TaskState::kFinished,
+          nullptr,
+          [&](Task* task) {
+            task->requestPause().wait();
+            Task::resume(task->shared_from_this());
+          });
+    }
+  }
+}
+
+DEBUG_ONLY_TEST_F(DriverTest, driverSuspensionRaceWithTaskTerminate) {
+  struct {
+    int numDrivers;
+    bool enterSuspensionAfterTaskTerminated;
+    bool abort;
+    StopReason expectedEnterSuspensionStopReason;
+    StopReason expectedLeaveSuspensionStopReason;
+
+    std::string debugString() const {
+      return fmt::format(
+          "numDrivers:{} enterSuspensionAfterTaskTerminated:{} abort {} expectedEnterSuspensionStopReason:{} expectedLeaveSuspensionStopReason:{}",
+          numDrivers,
+          enterSuspensionAfterTaskTerminated,
+          abort,
+          expectedEnterSuspensionStopReason,
+          expectedLeaveSuspensionStopReason);
+    }
+  } testSettings[] = {
+      // This test case (1) uses TestValue to block one of the task driver
+      // threads when it processes the input values; (2) terminates the task by
+      // cancel; (3) enters suspension from the blocked driver thread and
+      // expects to get kAlreadyTerminated stop reason as the task has been
+      // terminated; (4) leaves the suspension from the blocked driver thread
+      // and expects the same stop reason; (5) wait and expects the task to be
+      // aborted.
+      {1,
+       true,
+       true,
+       StopReason::kAlreadyTerminated,
+       StopReason::kAlreadyTerminated},
+      // The same as above with different number of driver threads.
+      {4,
+       true,
+       true,
+       StopReason::kAlreadyTerminated,
+       StopReason::kAlreadyTerminated},
+      // This test case (1) uses TestValue to block one of the task driver
+      // threads when it processes the input values; (2) enters suspension from
+      // the blocked driver thread and expects to get kNone stop reason as the
+      // task is still running; (3) terminates the task by cancel; (4) leaves
+      // the suspension from the blocked driver thread and expects
+      // kAlreadyTerminated stop reason as the task has been terminated same
+      // stop reason; (5) wait and expects the task to be aborted.
+      {1, false, true, StopReason::kNone, StopReason::kAlreadyTerminated},
+      // The same as above with different number of driver threads.
+      {4, false, true, StopReason::kNone, StopReason::kAlreadyTerminated},
+
+      // Repeated the above test cases by terminating task by cancel.
+      {1,
+       true,
+       false,
+       StopReason::kAlreadyTerminated,
+       StopReason::kAlreadyTerminated},
+      {4,
+       true,
+       false,
+       StopReason::kAlreadyTerminated,
+       StopReason::kAlreadyTerminated},
+      {1, false, false, StopReason::kNone, StopReason::kAlreadyTerminated},
+      {4, false, false, StopReason::kNone, StopReason::kAlreadyTerminated}};
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.debugString());
+
+    if (testData.enterSuspensionAfterTaskTerminated) {
+      testDriverSuspensionWithTaskOperationRace(
+          testData.numDrivers,
+          testData.expectedEnterSuspensionStopReason,
+          testData.expectedLeaveSuspensionStopReason,
+          testData.abort ? TaskState::kAborted : TaskState::kCanceled,
+          [&](Task* task) {
+            if (testData.abort) {
+              task->requestAbort();
+            } else {
+              task->requestCancel();
+            }
+          });
+    } else {
+      testDriverSuspensionWithTaskOperationRace(
+          testData.numDrivers,
+          testData.expectedEnterSuspensionStopReason,
+          testData.expectedLeaveSuspensionStopReason,
+          testData.abort ? TaskState::kAborted : TaskState::kCanceled,
+          nullptr,
+          [&](Task* task) {
+            if (testData.abort) {
+              task->requestAbort().wait();
+            } else {
+              task->requestCancel().wait();
+            }
+          });
+    }
+  }
+}
+
+DEBUG_ONLY_TEST_F(DriverTest, driverSuspensionRaceWithTaskYield) {
+  struct {
+    int numDrivers;
+    bool enterSuspensionAfterTaskYielded;
+    bool leaveSuspensionDuringTaskYielded;
+
+    std::string debugString() const {
+      return fmt::format(
+          "numDrivers:{} enterSuspensionAfterTaskYielded:{} leaveSuspensionDuringTaskYielded:{}",
+          numDrivers,
+          enterSuspensionAfterTaskYielded,
+          leaveSuspensionDuringTaskYielded);
+    }
+  } testSettings[] = {
+      {1, true, true},
+      {4, true, true},
+      {1, false, true},
+      {4, false, true},
+      {1, true, false},
+      {4, true, false}};
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.debugString());
+
+    std::shared_ptr<Task> task;
+    if (testData.enterSuspensionAfterTaskYielded &&
+        testData.leaveSuspensionDuringTaskYielded) {
+      testDriverSuspensionWithTaskOperationRace(
+          testData.numDrivers,
+          StopReason::kNone,
+          StopReason::kNone,
+          TaskState::kFinished,
+          [&](Task* task) { task->requestYield(); },
+          [&](Task* task) { task->requestYield(); });
+    } else if (
+        testData.enterSuspensionAfterTaskYielded &&
+        !testData.leaveSuspensionDuringTaskYielded) {
+      testDriverSuspensionWithTaskOperationRace(
+          testData.numDrivers,
+          StopReason::kNone,
+          StopReason::kNone,
+          TaskState::kFinished,
+          [&](Task* task) { task->requestYield(); });
+    } else if (
+        !testData.enterSuspensionAfterTaskYielded &&
+        testData.leaveSuspensionDuringTaskYielded) {
+      testDriverSuspensionWithTaskOperationRace(
+          testData.numDrivers,
+          StopReason::kNone,
+          StopReason::kNone,
+          TaskState::kFinished,
+          nullptr,
+          [&](Task* task) { task->requestYield(); });
+    }
+  }
+}
+
+DEBUG_ONLY_TEST_F(DriverTest, driverSuspensionCalledFromOffThread) {
+  std::shared_ptr<Driver> driver;
+  SCOPED_TESTVALUE_SET(
+      "facebook::velox::exec::Values::getOutput",
+      std::function<void(const exec::Values*)>([&](const exec::Values* values) {
+        driver = values->testingOperatorCtx()->driver()->shared_from_this();
+      }));
+
+  auto task = createAndStartTaskToReadValues(1);
+
+  ASSERT_TRUE(waitForTaskCompletion(task.get(), 100'000'000));
+  while (driver->isOnThread()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_ANY_THROW(driver->task()->enterSuspended(driver->state()));
+  ASSERT_ANY_THROW(driver->task()->leaveSuspended(driver->state()));
 }

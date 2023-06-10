@@ -20,6 +20,7 @@
 #include "velox/dwio/dwrf/common/wrap/dwrf-proto-wrapper.h"
 #include "velox/dwio/dwrf/reader/ColumnReader.h"
 #include "velox/dwio/dwrf/reader/SelectiveDwrfReader.h"
+#include "velox/dwio/dwrf/reader/StreamLabels.h"
 #include "velox/dwio/dwrf/test/OrcTest.h"
 #include "velox/dwio/type/fbhive/HiveTypeParser.h"
 #include "velox/vector/ComplexVector.h"
@@ -108,6 +109,8 @@ std::shared_ptr<T> getChild(std::shared_ptr<F>& batch, size_t index) {
 
 class ColumnReaderTestBase {
  protected:
+  ColumnReaderTestBase() : pool_{&streams_.getMemoryPool()}, labels_{pool_} {}
+
   virtual ~ColumnReaderTestBase() = default;
 
   void buildReader(
@@ -132,6 +135,7 @@ class ColumnReaderTestBase {
     if (useSelectiveReader()) {
       if (!scanSpec) {
         scanSpec_ = std::make_unique<common::ScanSpec>("root");
+        scanSpec_->addAllChildFields(*dataTypeWithId->type);
         scanSpec = scanSpec_.get();
       }
       makeFieldSpecs("", 0, rowType, scanSpec);
@@ -139,13 +143,14 @@ class ColumnReaderTestBase {
           cs.getSchemaWithId(),
           dataTypeWithId,
           streams_,
+          labels_,
           scanSpec,
-          FlatMapContext::nonFlatMapContext());
+          FlatMapContext{});
       selectiveColumnReader_->setIsTopLevel();
       columnReader_ = nullptr;
     } else {
-      columnReader_ =
-          ColumnReader::build(cs.getSchemaWithId(), dataTypeWithId, streams_);
+      columnReader_ = ColumnReader::build(
+          cs.getSchemaWithId(), dataTypeWithId, streams_, labels_);
       selectiveColumnReader_ = nullptr;
     }
   }
@@ -154,7 +159,7 @@ class ColumnReaderTestBase {
     if (columnReader_) {
       columnReader_->next(numValues, result);
     } else {
-      selectiveColumnReader_->next(numValues, result);
+      selectiveColumnReader_->next(numValues, result, nullptr);
     }
   }
 
@@ -180,7 +185,7 @@ class ColumnReaderTestBase {
     if (columnReader_) {
       columnReader_->next(readSize, batch);
     } else {
-      selectiveColumnReader_->next(readSize, batch);
+      selectiveColumnReader_->next(readSize, batch, nullptr);
     }
 
     ASSERT_EQ(readSize, batch->size());
@@ -202,6 +207,8 @@ class ColumnReaderTestBase {
   virtual bool returnFlatVector() const = 0;
 
   MockStripeStreams streams_;
+  AllocationPool pool_;
+  StreamLabels labels_;
   std::unique_ptr<ColumnReader> columnReader_;
   std::unique_ptr<SelectiveColumnReader> selectiveColumnReader_;
 
@@ -1193,7 +1200,7 @@ TEST_P(StringReaderTests, testStringDictSkipNoNulls) {
     if (columnReader_) {
       columnReader_->next(rowsRead, batch);
     } else {
-      selectiveColumnReader_->next(rowsRead, batch);
+      selectiveColumnReader_->next(rowsRead, batch, nullptr);
     }
 
     ASSERT_EQ(rowsRead, batch->size());
@@ -4265,6 +4272,7 @@ TEST_P(TestColumnReader, testPresentStreamChange) {
   auto pool = &streams_.getMemoryPool();
   VectorPtr toReset = std::make_shared<FlatVector<int32_t>>(
       pool,
+      INTEGER(),
       AlignedBuffer::allocate<bool>(1, pool),
       1,
       AlignedBuffer::allocate<int32_t>(1, pool),
@@ -4315,6 +4323,7 @@ TEST_P(TestColumnReader, testStructVectorTypeChange) {
   auto pool = &streams_.getMemoryPool();
   VectorPtr toReset = std::make_shared<FlatVector<float>>(
       pool,
+      REAL(),
       nullptr,
       1,
       AlignedBuffer::allocate<float>(1, pool),
@@ -4370,6 +4379,7 @@ TEST_P(TestColumnReader, testListVectorTypeChange) {
   auto pool = &streams_.getMemoryPool();
   VectorPtr elements = std::make_shared<FlatVector<int8_t>>(
       pool,
+      TINYINT(),
       nullptr,
       1,
       AlignedBuffer::allocate<int8_t>(1, pool),
@@ -4450,6 +4460,7 @@ TEST_P(TestColumnReader, testMapVectorTypeChange) {
   auto pool = &streams_.getMemoryPool();
   VectorPtr toReset = std::make_shared<FlatVector<int8_t>>(
       pool,
+      TINYINT(),
       nullptr,
       1,
       AlignedBuffer::allocate<int8_t>(1, pool),

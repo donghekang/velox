@@ -31,7 +31,7 @@ struct Size {
   FOLLY_ALWAYS_INLINE void initialize(
       const core::QueryConfig& config,
       const TInput* input /*input*/) {
-    legacySizeOfNull_ = config.get<bool>("legacySizeOfNull", true);
+    legacySizeOfNull_ = config.sparkLegacySizeOfNull();
   }
 
   template <typename TInput>

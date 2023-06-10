@@ -16,7 +16,6 @@
 
 #include <gtest/gtest.h>
 
-#include "velox/dwio/common/MemoryInputStream.h"
 #include "velox/dwio/common/encryption/TestProvider.h"
 #include "velox/dwio/dwrf/reader/StripeReaderBase.h"
 #include "velox/dwio/dwrf/utils/ProtoUtils.h"
@@ -64,11 +63,12 @@ class StripeLoadKeysTest : public Test {
 
     TestDecrypterFactory factory;
     auto handler = DecryptionHandler::create(FooterWrapper(footer), &factory);
-    pool_ = getDefaultMemoryPool();
+    pool_ = addDefaultLeafMemoryPool();
 
     reader_ = std::make_unique<ReaderBase>(
         *pool_,
-        std::make_unique<MemoryInputStream>(nullptr, 0),
+        std::make_unique<BufferedInput>(
+            std::make_shared<InMemoryReadFile>(std::string()), *pool_),
         nullptr,
         footer,
         nullptr,

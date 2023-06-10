@@ -106,11 +106,11 @@ class OperatorUtilsTest
     }
   }
 
-  std::shared_ptr<memory::MemoryPool> pool_{memory::getDefaultMemoryPool()};
+  std::shared_ptr<memory::MemoryPool> pool_{memory::addDefaultLeafMemoryPool()};
 };
 
 TEST_F(OperatorUtilsTest, wrapChildConstant) {
-  auto constant = BaseVector::createConstant(11, 1'000, pool_.get());
+  auto constant = makeConstant(11, 1'000);
 
   BufferPtr mapping = allocateIndices(1'234, pool_.get());
   auto rawMapping = mapping->asMutable<vector_size_t>();
@@ -175,10 +175,10 @@ TEST_F(OperatorUtilsTest, gatherCopy) {
 
   // Test with UNKNOWN type.
   int kNumRows = 100;
-  auto sourceVector = makeRowVector(
-      {makeFlatVector<int64_t>(kNumRows, [](auto row) { return row % 7; }),
-       BaseVector::createConstant(
-           variant(TypeKind::UNKNOWN), kNumRows, pool_.get())});
+  auto sourceVector = makeRowVector({
+      makeFlatVector<int64_t>(kNumRows, [](auto row) { return row % 7; }),
+      BaseVector::createNullConstant(UNKNOWN(), kNumRows, pool()),
+  });
   std::vector<const RowVector*> sourceVectors(kNumRows);
   std::vector<vector_size_t> sourceIndices(kNumRows);
   for (int i = 0; i < kNumRows; ++i) {
@@ -204,7 +204,7 @@ TEST_F(OperatorUtilsTest, gatherCopy) {
 }
 
 TEST_F(OperatorUtilsTest, makeOperatorSpillPath) {
-  EXPECT_EQ("spill/task_1_100", makeOperatorSpillPath("spill", "task", 1, 100));
+  EXPECT_EQ("spill/3_1_100", makeOperatorSpillPath("spill", 3, 1, 100));
 }
 
 TEST_F(OperatorUtilsTest, wrap) {
@@ -276,4 +276,86 @@ TEST_F(OperatorUtilsTest, addOperatorRuntimeStats) {
   ASSERT_EQ(stats[statsName].sum, 500);
   ASSERT_EQ(stats[statsName].max, 200);
   ASSERT_EQ(stats[statsName].min, 100);
+}
+
+TEST_F(OperatorUtilsTest, initializeRowNumberMapping) {
+  BufferPtr mapping;
+  auto rawMapping = initializeRowNumberMapping(mapping, 10, pool());
+  ASSERT_TRUE(mapping != nullptr);
+  ASSERT_GE(mapping->size(), 10);
+
+  rawMapping = initializeRowNumberMapping(mapping, 100, pool());
+  ASSERT_GE(mapping->size(), 100);
+
+  rawMapping = initializeRowNumberMapping(mapping, 60, pool());
+  ASSERT_GE(mapping->size(), 100);
+
+  ASSERT_EQ(mapping->refCount(), 1);
+  auto otherMapping = mapping;
+  ASSERT_EQ(mapping->refCount(), 2);
+  ASSERT_EQ(mapping.get(), otherMapping.get());
+  rawMapping = initializeRowNumberMapping(mapping, 10, pool());
+  ASSERT_NE(mapping.get(), otherMapping.get());
+}
+
+TEST_F(OperatorUtilsTest, projectChildren) {
+  const vector_size_t srcVectorSize{10};
+  const auto srcRowType = ROW({
+      {"bool_val", BOOLEAN()},
+      {"int_val", INTEGER()},
+      {"double_val", DOUBLE()},
+      {"string_val", VARCHAR()},
+  });
+  VectorFuzzer fuzzer({}, pool());
+  auto srcRowVector{fuzzer.fuzzRow(srcRowType, srcVectorSize)};
+
+  {
+    std::vector<IdentityProjection> emptyProjection;
+    auto destRowVector =
+        BaseVector::create<RowVector>(srcRowType, srcVectorSize, pool());
+    projectChildren(
+        destRowVector, srcRowVector, emptyProjection, srcVectorSize, nullptr);
+    for (vector_size_t i = 0; i < destRowVector->childrenSize(); ++i) {
+      ASSERT_EQ(destRowVector->childAt(i)->size(), 0);
+    }
+  }
+
+  {
+    std::vector<IdentityProjection> identicalProjections{};
+    for (auto i = 0; i < srcRowType->size(); ++i) {
+      identicalProjections.emplace_back(i, i);
+    }
+    auto destRowVector =
+        BaseVector::create<RowVector>(srcRowType, srcVectorSize, pool());
+    projectChildren(
+        destRowVector,
+        srcRowVector,
+        identicalProjections,
+        srcVectorSize,
+        nullptr);
+    for (const auto& projection : identicalProjections) {
+      ASSERT_EQ(
+          destRowVector->childAt(projection.outputChannel).get(),
+          srcRowVector->childAt(projection.inputChannel).get());
+    }
+  }
+
+  {
+    const auto destRowType = ROW({
+        {"double_val", DOUBLE()},
+        {"bool_val", BOOLEAN()},
+    });
+    std::vector<IdentityProjection> projections{};
+    projections.emplace_back(2, 0);
+    projections.emplace_back(0, 1);
+    auto destRowVector =
+        BaseVector::create<RowVector>(destRowType, srcVectorSize, pool());
+    projectChildren(
+        destRowVector, srcRowVector, projections, srcVectorSize, nullptr);
+    for (const auto& projection : projections) {
+      ASSERT_EQ(
+          destRowVector->childAt(projection.outputChannel).get(),
+          srcRowVector->childAt(projection.inputChannel).get());
+    }
+  }
 }

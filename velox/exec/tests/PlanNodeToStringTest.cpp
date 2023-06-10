@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "velox/connectors/hive/HiveConnector.h"
 #include "velox/exec/WindowFunction.h"
 #include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
@@ -148,6 +149,36 @@ TEST_F(PlanNodeToStringTest, withMultiLineContext) {
       plan_->toString(true, false, addContext));
 }
 
+TEST_F(PlanNodeToStringTest, values) {
+  auto plan = PlanBuilder().values({data_}).planNode();
+
+  ASSERT_EQ("-- Values\n", plan->toString());
+  ASSERT_EQ(
+      "-- Values[5 rows in 1 vectors] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
+      plan->toString(true, false));
+
+  plan = PlanBuilder().values({data_}, true).planNode();
+
+  ASSERT_EQ("-- Values\n", plan->toString());
+  ASSERT_EQ(
+      "-- Values[5 rows in 1 vectors] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
+      plan->toString(true, false));
+
+  plan = PlanBuilder().values({data_}, false, 10).planNode();
+
+  ASSERT_EQ("-- Values\n", plan->toString());
+  ASSERT_EQ(
+      "-- Values[5 rows in 1 vectors, repeat 10 times] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
+      plan->toString(true, false));
+
+  plan = PlanBuilder().values({data_}, true, 10).planNode();
+
+  ASSERT_EQ("-- Values\n", plan->toString());
+  ASSERT_EQ(
+      "-- Values[5 rows in 1 vectors, repeat 10 times] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
+      plan->toString(true, false));
+}
+
 TEST_F(PlanNodeToStringTest, aggregation) {
   // Global aggregation.
   auto plan = PlanBuilder()
@@ -262,6 +293,48 @@ TEST_F(PlanNodeToStringTest, hashJoin) {
   ASSERT_EQ(
       "-- HashJoin[LEFT t_c0=u_c0, filter: gt(ROW[\"t_c1\"],ROW[\"u_c1\"])] -> t_c0:SMALLINT, t_c1:INTEGER, u_c1:INTEGER\n",
       plan->toString(true, false));
+
+  plan = PlanBuilder()
+             .values({data_})
+             .project({"c0 as t_c0", "c1 as t_c1"})
+             .hashJoin(
+                 {"t_c0"},
+                 {"u_c0"},
+                 PlanBuilder()
+                     .values({data_})
+                     .project({"c0 as u_c0", "c1 as u_c1"})
+                     .planNode(),
+                 "",
+                 {"t_c0", "t_c1"},
+                 core::JoinType::kAnti,
+                 true /*nullAware*/)
+             .planNode();
+
+  ASSERT_EQ("-- HashJoin\n", plan->toString());
+  ASSERT_EQ(
+      "-- HashJoin[ANTI t_c0=u_c0, null aware] -> t_c0:SMALLINT, t_c1:INTEGER\n",
+      plan->toString(true, false));
+
+  plan = PlanBuilder()
+             .values({data_})
+             .project({"c0 as t_c0", "c1 as t_c1"})
+             .hashJoin(
+                 {"t_c0"},
+                 {"u_c0"},
+                 PlanBuilder()
+                     .values({data_})
+                     .project({"c0 as u_c0", "c1 as u_c1"})
+                     .planNode(),
+                 "",
+                 {"t_c0", "t_c1"},
+                 core::JoinType::kAnti,
+                 false /*nullAware*/)
+             .planNode();
+
+  ASSERT_EQ("-- HashJoin\n", plan->toString());
+  ASSERT_EQ(
+      "-- HashJoin[ANTI t_c0=u_c0] -> t_c0:SMALLINT, t_c1:INTEGER\n",
+      plan->toString(true, false));
 }
 
 TEST_F(PlanNodeToStringTest, mergeJoin) {
@@ -305,11 +378,11 @@ TEST_F(PlanNodeToStringTest, mergeJoin) {
       plan->toString(true, false));
 }
 
-TEST_F(PlanNodeToStringTest, crossJoin) {
+TEST_F(PlanNodeToStringTest, nestedLoopJoin) {
   auto plan = PlanBuilder()
                   .values({data_})
                   .project({"c0 as t_c0", "c1 as t_c1"})
-                  .crossJoin(
+                  .nestedLoopJoin(
                       PlanBuilder()
                           .values({data_})
                           .project({"c0 as u_c0", "c1 as u_c1"})
@@ -317,9 +390,9 @@ TEST_F(PlanNodeToStringTest, crossJoin) {
                       {"t_c0", "t_c1", "u_c1"})
                   .planNode();
 
-  ASSERT_EQ("-- CrossJoin\n", plan->toString());
+  ASSERT_EQ("-- NestedLoopJoin\n", plan->toString());
   ASSERT_EQ(
-      "-- CrossJoin[] -> t_c0:SMALLINT, t_c1:INTEGER, u_c1:INTEGER\n",
+      "-- NestedLoopJoin[INNER] -> t_c0:SMALLINT, t_c1:INTEGER, u_c1:INTEGER\n",
       plan->toString(true, false));
 }
 
@@ -420,7 +493,7 @@ TEST_F(PlanNodeToStringTest, localPartition) {
 
   ASSERT_EQ("-- LocalPartition\n", plan->toString());
   ASSERT_EQ(
-      "-- LocalPartition[REPARTITION] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
+      "-- LocalPartition[REPARTITION HASH(c0)] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
       plan->toString(true, false));
 
   plan = PlanBuilder().values({data_}).localPartition({}).planNode();
@@ -428,6 +501,13 @@ TEST_F(PlanNodeToStringTest, localPartition) {
   ASSERT_EQ("-- LocalPartition\n", plan->toString());
   ASSERT_EQ(
       "-- LocalPartition[GATHER] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
+      plan->toString(true, false));
+
+  plan = PlanBuilder().values({data_}).localPartitionRoundRobin().planNode();
+
+  ASSERT_EQ("-- LocalPartition\n", plan->toString());
+  ASSERT_EQ(
+      "-- LocalPartition[REPARTITION ROUND ROBIN] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
       plan->toString(true, false));
 }
 
@@ -462,6 +542,21 @@ TEST_F(PlanNodeToStringTest, partitionedOutput) {
   ASSERT_EQ("-- PartitionedOutput\n", plan->toString());
   ASSERT_EQ(
       "-- PartitionedOutput[HASH(c1, c2) 5 replicate nulls and any] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
+      plan->toString(true, false));
+
+  auto hiveSpec = std::make_shared<connector::hive::HivePartitionFunctionSpec>(
+      4,
+      std::vector<int>{0, 1, 0, 1},
+      std::vector<column_index_t>{1, 2},
+      std::vector<VectorPtr>{});
+
+  plan = PlanBuilder()
+             .values({data_})
+             .partitionedOutput({"c1", "c2"}, 2, false, hiveSpec)
+             .planNode();
+  ASSERT_EQ("-- PartitionedOutput\n", plan->toString());
+  ASSERT_EQ(
+      "-- PartitionedOutput[HIVE((1, 2) buckets: 4) 2] -> c0:SMALLINT, c1:INTEGER, c2:BIGINT\n",
       plan->toString(true, false));
 }
 
@@ -503,7 +598,7 @@ TEST_F(PlanNodeToStringTest, tableScan) {
       ROW({"discount", "quantity", "shipdate", "comment"},
           {DOUBLE(), DOUBLE(), VARCHAR(), VARCHAR()})};
   {
-    auto plan = PlanBuilder()
+    auto plan = PlanBuilder(pool_.get())
                     .tableScan(
                         rowType,
                         {"shipdate between '1994-01-01' and '1994-12-31'",
@@ -524,7 +619,7 @@ TEST_F(PlanNodeToStringTest, tableScan) {
   }
   {
     auto plan =
-        PlanBuilder()
+        PlanBuilder(pool_.get())
             .tableScan(rowType, {}, "comment NOT LIKE '%special%request%'")
             .planNode();
 
@@ -583,4 +678,79 @@ TEST_F(PlanNodeToStringTest, window) {
       "w0 := window1(ROW[\"c\"]) RANGE between CURRENT ROW and b FOLLOWING] "
       "-> a:VARCHAR, b:BIGINT, c:BIGINT, w0:BIGINT\n",
       plan->toString(true, false));
+}
+
+TEST_F(PlanNodeToStringTest, rowNumber) {
+  auto plan =
+      PlanBuilder().tableScan(ROW({"a"}, {VARCHAR()})).rowNumber({}).planNode();
+
+  ASSERT_EQ("-- RowNumber\n", plan->toString());
+  ASSERT_EQ(
+      "-- RowNumber[] -> a:VARCHAR, row_number:BIGINT\n",
+      plan->toString(true, false));
+
+  plan = PlanBuilder()
+             .tableScan(ROW({"a", "b"}, {BIGINT(), VARCHAR()}))
+             .rowNumber({"a", "b"})
+             .planNode();
+
+  ASSERT_EQ("-- RowNumber\n", plan->toString());
+  ASSERT_EQ(
+      "-- RowNumber[partition by (a, b)] -> a:BIGINT, b:VARCHAR, row_number:BIGINT\n",
+      plan->toString(true, false));
+
+  plan = PlanBuilder()
+             .tableScan(ROW({"a", "b"}, {BIGINT(), VARCHAR()}))
+             .rowNumber({"b"}, 10)
+             .planNode();
+
+  ASSERT_EQ("-- RowNumber\n", plan->toString());
+  ASSERT_EQ(
+      "-- RowNumber[partition by (b) limit 10] -> a:BIGINT, b:VARCHAR, row_number:BIGINT\n",
+      plan->toString(true, false));
+}
+
+TEST_F(PlanNodeToStringTest, topNRowNumber) {
+  auto rowType = ROW({"a", "b"}, {BIGINT(), VARCHAR()});
+  auto plan = PlanBuilder()
+                  .tableScan(rowType)
+                  .topNRowNumber({}, {"a DESC"}, 10, false)
+                  .planNode();
+
+  ASSERT_EQ("-- TopNRowNumber\n", plan->toString());
+  ASSERT_EQ(
+      "-- TopNRowNumber[order by (a DESC NULLS LAST) limit 10] -> a:BIGINT, b:VARCHAR\n",
+      plan->toString(true, false));
+
+  plan = PlanBuilder()
+             .tableScan(rowType)
+             .topNRowNumber({}, {"a DESC"}, 10, true)
+             .planNode();
+
+  ASSERT_EQ("-- TopNRowNumber\n", plan->toString());
+  ASSERT_EQ(
+      "-- TopNRowNumber[order by (a DESC NULLS LAST) limit 10] -> a:BIGINT, b:VARCHAR, row_number:BIGINT\n",
+      plan->toString(true, false));
+
+  plan = PlanBuilder()
+             .tableScan(rowType)
+             .topNRowNumber({"a"}, {"b"}, 10, false)
+             .planNode();
+
+  ASSERT_EQ("-- TopNRowNumber\n", plan->toString());
+  ASSERT_EQ(
+      "-- TopNRowNumber[partition by (a) order by (b ASC NULLS LAST) limit 10] -> a:BIGINT, b:VARCHAR\n",
+      plan->toString(true, false));
+}
+
+TEST_F(PlanNodeToStringTest, markDistinct) {
+  auto op =
+      PlanBuilder()
+          .tableScan(ROW({"a", "b", "c"}, {VARCHAR(), BIGINT(), BIGINT()}))
+          .markDistinct("marker", {"a", "b"})
+          .planNode();
+  ASSERT_EQ("-- MarkDistinct\n", op->toString());
+  ASSERT_EQ(
+      "-- MarkDistinct[a, b] -> a:VARCHAR, b:BIGINT, c:BIGINT, marker:BOOLEAN\n",
+      op->toString(true, false));
 }

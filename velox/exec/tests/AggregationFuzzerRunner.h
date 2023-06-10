@@ -22,9 +22,13 @@
 #include <unordered_set>
 #include <vector>
 
+#include "velox/common/file/FileSystems.h"
 #include "velox/exec/Aggregate.h"
 #include "velox/exec/tests/AggregationFuzzer.h"
 #include "velox/parse/TypeResolver.h"
+#include "velox/serializers/PrestoSerializer.h"
+
+namespace facebook::velox::exec::test {
 
 /// AggregationFuzzerRunner leverages AggregationFuzzer and VectorFuzzer to
 /// automatically generate and execute aggregation tests. It works by:
@@ -63,12 +67,64 @@
 
 class AggregationFuzzerRunner {
  public:
-  static int run(
+  // TODO: List of the functions that at some point crash or fail and need to
+  // be fixed before we can enable.
+  static inline const std::unordered_set<std::string> skipFunctions_ = {
+      "stddev_pop", // https://github.com/facebookincubator/velox/issues/3493
+  };
+
+  // Functions whose results verification should be skipped. These can be
+  // order-dependent functions whose results depend on the order of input rows,
+  // or functions that return complex-typed results containing floating-point
+  // fields. For some functions, the result can be transformed to a value that
+  // can be verified. If such transformation exists, it can be specified to be
+  // used for results verification. If no transformation is specified, results
+  // are not verified.
+  static inline const std::unordered_map<std::string, std::string>
+      customVerificationFunctions_ = {
+          // Order-dependent functions.
+          {"approx_distinct", ""},
+          {"approx_distinct_partial", ""},
+          {"approx_distinct_merge", ""},
+          {"approx_set", ""},
+          {"approx_set_partial", ""},
+          {"approx_set_merge", ""},
+          {"approx_percentile_partial", ""},
+          {"approx_percentile_merge", ""},
+          {"arbitrary", ""},
+          {"array_agg", "array_sort({})"},
+          {"set_agg", "array_sort({})"},
+          {"set_union", "array_sort({})"},
+          {"map_agg", "array_sort(map_keys({}))"},
+          {"map_union", "array_sort(map_keys({}))"},
+          {"map_union_sum", "array_sort(map_keys({}))"},
+          {"max_by", ""},
+          {"min_by", ""},
+          // TODO: Skip result verification of companion functions that return
+          // complex types that contain floating-point fields for now, until we
+          // fix
+          // test utilities in QueryAssertions to tolerate floating-point
+          // imprecision in complex types.
+          // https://github.com/facebookincubator/velox/issues/4481
+          {"avg_partial", ""},
+          {"avg_merge", ""},
+  };
+
+  static int run(const std::string& planPath) {
+    return runFuzzer("", 0, {planPath});
+  }
+
+  static int run(const std::string& onlyFunctions, size_t seed) {
+    return runFuzzer(onlyFunctions, seed, std::nullopt);
+  }
+
+  static int runFuzzer(
       const std::string& onlyFunctions,
       size_t seed,
-      const std::unordered_set<std::string>& skipFunctions,
+      const std::optional<std::string>& planPath,
+      const std::unordered_set<std::string>& skipFunctions = skipFunctions_,
       const std::unordered_map<std::string, std::string>&
-          orderDependentFunctions) {
+          customVerificationFunctions = customVerificationFunctions_) {
     auto signatures = facebook::velox::exec::getAggregateFunctionSignatures();
     if (signatures.empty()) {
       LOG(ERROR) << "No aggregate functions registered.";
@@ -84,9 +140,12 @@ class AggregationFuzzerRunner {
     }
 
     facebook::velox::parse::registerTypeResolver();
+    facebook::velox::serializer::presto::PrestoVectorSerde::
+        registerVectorSerde();
+    facebook::velox::filesystems::registerLocalFileSystem();
 
     facebook::velox::exec::test::aggregateFuzzer(
-        filteredSignatures, seed, orderDependentFunctions);
+        filteredSignatures, seed, customVerificationFunctions, planPath);
     // Calling gtest here so that it can be recognized as tests in CI systems.
     return RUN_ALL_TESTS();
   }
@@ -137,3 +196,5 @@ class AggregationFuzzerRunner {
     return output;
   }
 };
+
+} // namespace facebook::velox::exec::test

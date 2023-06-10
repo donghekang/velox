@@ -42,9 +42,16 @@ struct CursorParameters {
   core::ExecutionStrategy executionStrategy{
       core::ExecutionStrategy::kUngrouped};
 
+  /// Contains leaf plan nodes that need to be executed in the grouped mode.
+  std::unordered_set<core::PlanNodeId> groupedExecutionLeafNodeIds;
+
   // Number of splits groups the task will be processing. Must be 1 for
   // ungrouped execution.
   int numSplitGroups{1};
+
+  /// Spilling directory, if not empty, then the task's spilling directory would
+  /// be built from it.
+  std::string spillDirectory;
 };
 
 class TaskQueue {
@@ -55,7 +62,7 @@ class TaskQueue {
   };
 
   explicit TaskQueue(uint64_t maxBytes)
-      : pool_(memory::getDefaultMemoryPool()), maxBytes_(maxBytes) {}
+      : pool_(memory::addDefaultLeafMemoryPool()), maxBytes_(maxBytes) {}
 
   void setNumProducers(int32_t n) {
     numProducers_ = n;

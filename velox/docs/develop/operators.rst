@@ -25,6 +25,7 @@ of plan nodes can be located at the leaves of the plan tree. These are:
 * ValuesNode
 * ExchangeNode
 * MergeExchangeNode
+* ArrowStreamNode
 
 Here is a list of supported plan nodes and corresponding operators.
 
@@ -32,13 +33,15 @@ Here is a list of supported plan nodes and corresponding operators.
 Plan Node                   Operator(s)                                      Leaf Node / Source Operator
 ==========================  ==============================================   ===========================
 TableScanNode               TableScan                                        Y
+ArrowStreamNode             ArrowStream                                      Y
 FilterNode                  FilterProject
 ProjectNode                 FilterProject
 AggregationNode             HashAggregation or StreamingAggregation
 GroupIdNode                 GroupId
+MarkDistinctNode            MarkDistinct
 HashJoinNode                HashProbe and HashBuild
 MergeJoinNode               MergeJoin
-CrossJoinNode               CrossJoinProbe and CrossJoinBuild
+NestedLoopJoinNode          NestedLoopJoinProbe and NestedLoopJoinBuild
 OrderByNode                 OrderBy
 TopNNode                    TopN
 LimitNode                   Limit
@@ -77,6 +80,24 @@ with HiveConnector, table scan reads data from ORC or Parquet files.
      - Connector-specific description of the table. May include a pushed down filter.
    * - assignments
      - Connector-specific mapping from the table schema to output columns.
+
+.. _ArrowStream operator:
+
+ArrowStreamNode
+~~~~~~~~~~~~~~~
+
+The Arrow stream operation reads data from an Arrow array stream. The ArrowArrayStream structure is defined in Arrow abi, 
+and provides the required callbacks to interact with a streaming source of Arrow arrays.
+
+.. list-table::
+   :widths: 10 30
+   :align: left
+   :header-rows: 1
+
+   * - Property
+     - Description
+   * - arrowStream
+     - The constructed Arrow array stream. This is a streaming source of data chunks, each with the same schema.
 
 FilterNode
 ~~~~~~~~~~
@@ -142,6 +163,7 @@ each measure for each combination of the grouping keys.
      - A boolean flag indicating whether the aggregation should drop rows with nulls in any of the grouping keys. Used to avoid unnecessary processing for an aggregation followed by an inner join on the grouping keys.
 
 .. _group-id-node:
+
 GroupIdNode
 ~~~~~~~~~~~
 
@@ -191,7 +213,9 @@ and emitting results.
    * - Property
      - Description
    * - joinType
-     - Join type: inner, left, right, full, left semi, anti. You can read about different join types in this `blog post <https://dataschool.com/how-to-teach-people-sql/sql-join-types-explained-visually/>`_.
+     - Join type: inner, left, right, full, left semi filter, left semi project, right semi filter, right semi project, anti. You can read about different join types in this `blog post <https://dataschool.com/how-to-teach-people-sql/sql-join-types-explained-visually/>`_.
+   * - nullAware
+     - Applies to anti and semi project joins only. Indicates whether the join semantic is IN (nullAware = true) or EXISTS (nullAware = false).
    * - leftKeys
      - Columns from the left hand side input that are part of the equality condition. At least one must be specified.
    * - rightKeys
@@ -201,13 +225,13 @@ and emitting results.
    * - outputType
      - A list of output columns. This is a subset of columns available in the left and right inputs of the join. The columns may appear in different order than in the input.
 
-CrossJoinNode
-~~~~~~~~~~~~~
+NestedLoopJoinNode
+~~~~~~~~~~~~~~~~~~
 
-The cross join operation combines two separate inputs into a single output by
-combining each row of the left hand side input with each row of the right hand
-side input. If there are N rows in the left input and M rows in the right
-input, the output of the cross join will contain N * M rows.
+NestedLoopJoinNode represents an implementation that iterates through each row from
+the left side of the join and, for each row, iterates through all rows from the right
+side of the join, comparing them based on the join condition to find matching rows
+and emitting results. Nested loop join supports non-equality join.
 
 .. list-table::
    :widths: 10 30
@@ -216,6 +240,10 @@ input, the output of the cross join will contain N * M rows.
 
    * - Property
      - Description
+   * - joinType
+     - Join type: inner, left, right, full.
+   * - joinCondition
+     - Expression used as the join condition, may reference columns from both inputs.
    * - outputType
      - A list of output columns. This is a subset of columns available in the left and right inputs of the join. The columns may appear in different order than in the input.
 
@@ -374,6 +402,10 @@ The values operation returns specified data.
      - Description
    * - values
      - Set of rows to return.
+   * - parallelizable
+     - If the same input should be produced by each thread (one per driver).
+   * - repeatTimes
+     - How many times each vector should be produced as input.
 
 ExchangeNode
 ~~~~~~~~~~~~
@@ -485,6 +517,7 @@ the nodes executing the same query stage in a distributed query execution.
      - A 24-bit integer to uniquely identify the task id across all the nodes.
 
 .. _window-node:
+
 WindowNode
 ~~~~~~~~~~
 
@@ -515,6 +548,24 @@ If no sorting columns are specified then the order of the results is unspecified
     - Output column names for each window function invocation in windowFunctions list below.
   * - windowFunctions
     - Window function calls with the frame clause. e.g row_number(), first_value(name) between range 10 preceding and current row. The default frame is between range unbounded preceding and current row.
+
+MarkDistinctNode
+~~~~~~~~~~~~~~~~
+
+The MarkDistinct operator is used to produce aggregate mask columns for aggregations over distinct values, e.g. agg(DISTINCT a).
+Mask is a boolean column set to true for a subset of input rows that collectively represent a set of unique values of 'distinctKeys'.
+
+.. list-table::
+  :widths: 10 30
+  :align: left
+  :header-rows: 1
+
+  * - Property
+    - Description
+  * - markerName
+    - Name of the output mask column.
+  * - distinctKeys
+    - Names of grouping keys.
 
 Examples
 --------

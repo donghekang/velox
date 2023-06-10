@@ -43,9 +43,11 @@ constexpr uint64_t DEFAULT_AUTO_PRELOAD_SIZE =
 struct Region {
   uint64_t offset;
   uint64_t length;
+  // Optional label used by lower layers for cache warm up
+  std::string_view label;
 
-  Region(uint64_t offset = 0, uint64_t length = 0)
-      : offset{offset}, length{length} {}
+  Region(uint64_t offset = 0, uint64_t length = 0, std::string_view label = {})
+      : offset{offset}, length{length}, label{label} {}
 
   bool operator<(const Region& other) const;
 };
@@ -133,7 +135,7 @@ class InputStream {
   virtual void vread(
       const std::vector<void*>& buffers,
       const std::vector<Region>& regions,
-      const LogType purpose);
+      const LogType purpose) = 0;
 
   // case insensitive find
   static uint32_t ifind(const std::string& src, const std::string& target);
@@ -142,52 +144,18 @@ class InputStream {
 
   virtual void logRead(uint64_t offset, uint64_t length, LogType purpose);
 
-  using Factory = std::function<std::unique_ptr<InputStream>(
-      const std::string&,
-      const MetricsLogPtr&,
-      IoStatistics* FOLLY_NULLABLE stats)>;
-
-  static std::unique_ptr<InputStream> create(
-      const std::string&,
-      const MetricsLogPtr& = MetricsLog::voidLog(),
-      IoStatistics* FOLLY_NULLABLE stats = nullptr);
-
-  static bool registerFactory(Factory factory);
-
  protected:
   std::string path_;
   MetricsLogPtr metricsLog_;
   IoStatistics* FOLLY_NULLABLE stats_;
 };
 
-class FileInputStream : public InputStream {
- private:
-  int file;
-  uint64_t totalLength;
-
- public:
-  explicit FileInputStream(
-      const std::string& filename,
-      const MetricsLogPtr& metricsLog = MetricsLog::voidLog(),
-      IoStatistics* FOLLY_NULLABLE stats = nullptr);
-
-  ~FileInputStream() override;
-
-  uint64_t getLength() const override;
-
-  uint64_t getNaturalReadSize() const override;
-
-  void read(void* FOLLY_NONNULL, uint64_t, uint64_t, LogType) override;
-
-  static void registerFactory();
-};
-
 // An input stream that reads from an already opened ReadFile.
 class ReadFileInputStream final : public InputStream {
  public:
-  // Does not take ownership of |readFile|.
+  // Take shared ownership of |readFile|.
   explicit ReadFileInputStream(
-      velox::ReadFile* FOLLY_NONNULL readFile,
+      std::shared_ptr<velox::ReadFile>,
       const MetricsLogPtr& metricsLog = MetricsLog::voidLog(),
       IoStatistics* FOLLY_NULLABLE stats = nullptr);
 
@@ -198,8 +166,7 @@ class ReadFileInputStream final : public InputStream {
   }
 
   uint64_t getNaturalReadSize() const final {
-    // TODO: configure this accurately if it actually has impact.
-    return 10ULL << 20;
+    return readFile_->getNaturalReadSize();
   }
 
   void read(void* FOLLY_NONNULL, uint64_t, uint64_t, LogType) override;
@@ -216,46 +183,17 @@ class ReadFileInputStream final : public InputStream {
 
   bool hasReadAsync() const override;
 
+  void vread(
+      const std::vector<void*>& buffers,
+      const std::vector<Region>& regions,
+      const LogType purpose) override;
+
+  const std::shared_ptr<velox::ReadFile>& getReadFile() const {
+    return readFile_;
+  }
+
  private:
-  velox::ReadFile* FOLLY_NONNULL readFile_;
+  std::shared_ptr<velox::ReadFile> readFile_;
 };
 
-class ReferenceableInputStream : public InputStream {
- private:
-  uint64_t autoPreloadLength_;
-  bool prefetching_;
-
- public:
-  explicit ReferenceableInputStream(
-      const std::string& /* UNUSED*/,
-      const MetricsLogPtr& metricsLog = MetricsLog::voidLog(),
-      IoStatistics* FOLLY_NULLABLE stats = nullptr)
-      : InputStream("ReferenceablelnputStream", metricsLog, stats),
-        autoPreloadLength_(0),
-        prefetching_(false) {}
-  virtual ~ReferenceableInputStream() = default;
-  virtual uint64_t getPreloadLength() const;
-  virtual void setPreloadLength(uint64_t length);
-  virtual void preload(uint64_t, uint64_t, LogType) {}
-  virtual bool getPrefetching();
-  virtual void setPrefetching(bool pf);
-  virtual const void* FOLLY_NULLABLE readReference(
-      void* FOLLY_NONNULL buf,
-      uint64_t length,
-      uint64_t offset,
-      LogType) = 0;
-  virtual const void* FOLLY_NULLABLE
-  readReferenceOnly(uint64_t length, uint64_t offset, LogType) = 0;
-};
 } // namespace facebook::velox::dwio::common
-
-#define VELOX_STATIC_REGISTER_INPUT_STREAM(function)                           \
-  namespace {                                                                  \
-  static bool FB_ANONYMOUS_VARIABLE(g_InputStreamFunction) =                   \
-      facebook::velox::dwio::common::InputStream::registerFactory((function)); \
-  }
-
-#define VELOX_REGISTER_INPUT_STREAM_METHOD_DEFINITION(class, function)       \
-  void class ::registerFactory() {                                           \
-    facebook::velox::dwio::common::InputStream::registerFactory((function)); \
-  }

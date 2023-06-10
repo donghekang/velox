@@ -71,8 +71,6 @@ class HistogramAggregate : public exec::Aggregate {
     }
   }
 
-  void finalize(char** /*groups*/, int32_t /*numGroups*/) override {}
-
   void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
       override {
     auto mapVector = (*result)->as<MapVector>();
@@ -98,6 +96,7 @@ class HistogramAggregate : public exec::Aggregate {
       if (mapSize == 0) {
         bits::setNull(rawNulls, i, true);
       } else {
+        clearNull(rawNulls, i);
         for (auto it = groupMap->begin(); it != groupMap->end(); ++it) {
           mapKeys->set(index, it->first);
           mapValues->set(index, it->second);
@@ -222,16 +221,28 @@ class HistogramAggregate : public exec::Aggregate {
   DecodedVector decodedIntermediate_;
 };
 
-bool registerHistogramAggregate(const std::string& name) {
-  std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures{
-      exec::AggregateFunctionSignatureBuilder()
-          .typeVariable("T")
-          .returnType("map(T,bigint)")
-          .intermediateType("map(T,bigint)")
-          .argumentType("T")
-          .build()};
+exec::AggregateRegistrationResult registerHistogram(const std::string& name) {
+  std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures;
+  for (const auto inputType :
+       {"boolean",
+        "tinyint",
+        "smallint",
+        "integer",
+        "bigint",
+        "real",
+        "double",
+        "timestamp",
+        "date",
+        "interval day to second"}) {
+    signatures.push_back(
+        exec::AggregateFunctionSignatureBuilder()
+            .returnType(fmt::format("map({},bigint)", inputType))
+            .intermediateType(fmt::format("map({},bigint)", inputType))
+            .argumentType(inputType)
+            .build());
+  }
 
-  exec::registerAggregateFunction(
+  return exec::registerAggregateFunction(
       name,
       std::move(signatures),
       [name](
@@ -265,9 +276,6 @@ bool registerHistogramAggregate(const std::string& name) {
             return std::make_unique<HistogramAggregate<Timestamp>>(resultType);
           case TypeKind::DATE:
             return std::make_unique<HistogramAggregate<Date>>(resultType);
-          case TypeKind::INTERVAL_DAY_TIME:
-            return std::make_unique<HistogramAggregate<IntervalDayTime>>(
-                resultType);
           default:
             VELOX_NYI(
                 "Unknown input type for {} aggregation {}",
@@ -275,13 +283,12 @@ bool registerHistogramAggregate(const std::string& name) {
                 inputType->kindName());
         }
       });
-  return true;
 }
 
 } // namespace
 
-void registerHistogramAggregate() {
-  registerHistogramAggregate(kHistogram);
+void registerHistogramAggregate(const std::string& prefix) {
+  registerHistogram(prefix + kHistogram);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

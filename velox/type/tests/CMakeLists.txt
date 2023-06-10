@@ -17,6 +17,8 @@ add_executable(
   TypeTest.cpp
   DecimalTest.cpp
   FilterTest.cpp
+  FilterSerDeTest.cpp
+  HugeIntTest.cpp
   SubfieldTest.cpp
   TimestampConversionTest.cpp
   VariantTest.cpp
@@ -29,12 +31,11 @@ target_link_libraries(
   velox_type
   velox_serialization
   velox_external_date
-  ${FOLLY}
-  ${DOUBLE_CONVERSION}
+  Folly::folly
   gtest
   gtest_main
   gmock
-  ${gflags_LIBRARIES}
+  gflags::gflags
   glog::glog)
 
 add_executable(velox_filter_benchmark FilterBenchmark.cpp)
@@ -43,12 +44,11 @@ target_link_libraries(
   velox_filter_benchmark
   velox_type
   velox_serialization
-  ${FOLLY}
+  Folly::folly
   ${FOLLY_BENCHMARK}
-  ${DOUBLE_CONVERSION}
   gtest
   gtest_main
-  ${gflags_LIBRARIES}
+  gflags::gflags
   glog::glog)
 
 add_executable(velox_negated_values_filter_benchmark
@@ -58,12 +58,11 @@ target_link_libraries(
   velox_negated_values_filter_benchmark
   velox_type
   velox_serialization
-  ${FOLLY}
+  Folly::folly
   ${FOLLY_BENCHMARK}
-  ${DOUBLE_CONVERSION}
   gtest
   gtest_main
-  ${gflags_LIBRARIES}
+  gflags::gflags
   glog::glog)
 
 add_executable(velox_negated_bytes_values_benchmark
@@ -73,12 +72,11 @@ target_link_libraries(
   velox_negated_bytes_values_benchmark
   velox_type
   velox_serialization
-  ${FOLLY}
+  Folly::folly
   ${FOLLY_BENCHMARK}
-  ${DOUBLE_CONVERSION}
   gtest
   gtest_main
-  ${gflags_LIBRARIES}
+  gflags::gflags
   glog::glog)
 
 add_executable(velox_negated_bigint_range_benchmark
@@ -88,12 +86,11 @@ target_link_libraries(
   velox_negated_bigint_range_benchmark
   velox_type
   velox_serialization
-  ${FOLLY}
+  Folly::folly
   ${FOLLY_BENCHMARK}
-  ${DOUBLE_CONVERSION}
   gtest
   gtest_main
-  ${gflags_LIBRARIES}
+  gflags::gflags
   glog::glog)
 
 add_executable(velox_negated_bytes_range_benchmark
@@ -103,10 +100,21 @@ target_link_libraries(
   velox_negated_bytes_range_benchmark
   velox_type
   velox_serialization
-  ${FOLLY}
+  Folly::folly
   ${FOLLY_BENCHMARK}
-  ${DOUBLE_CONVERSION}
   gtest
   gtest_main
-  ${gflags_LIBRARIES}
+  gflags::gflags
+  glog::glog)
+
+add_executable(velox_string_view_benchmark StringViewBenchmark.cpp)
+
+target_link_libraries(
+  velox_string_view_benchmark
+  velox_type
+  Folly::folly
+  ${FOLLY_BENCHMARK}
+  gtest
+  gtest_main
+  gflags::gflags
   glog::glog)

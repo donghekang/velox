@@ -16,7 +16,6 @@
 #include "velox/duckdb/conversion/DuckParser.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/core/PlanNode.h"
-#include "velox/external/duckdb/duckdb.hpp"
 #include "velox/parse/Expressions.h"
 
 using namespace facebook::velox;
@@ -47,6 +46,11 @@ TEST(DuckParserTest, constants) {
 
   // Nulls
   EXPECT_EQ("null", parseExpr("NULL")->toString());
+  EXPECT_EQ("null", parseExpr("NULL::double")->toString());
+
+  // Booleans
+  EXPECT_EQ("true", parseExpr("TRUE")->toString());
+  EXPECT_EQ("false", parseExpr("FALSE")->toString());
 }
 
 TEST(DuckParserTest, arrays) {
@@ -208,25 +212,31 @@ TEST(DuckParserTest, between) {
 }
 
 TEST(DuckParserTest, interval) {
-  EXPECT_EQ("\"0 05:00:00.000\"", parseExpr("INTERVAL 5 HOURS")->toString());
-  EXPECT_EQ("\"0 00:36:00.000\"", parseExpr("INTERVAL 36 MINUTES")->toString());
-  EXPECT_EQ("\"0 00:00:07.000\"", parseExpr("INTERVAL 7 SECONDS")->toString());
-  EXPECT_EQ(
-      "\"0 00:00:00.123\"", parseExpr("INTERVAL 123 MILLISECONDS")->toString());
+  auto parseInterval = [](const std::string& sql) {
+    auto expr =
+        std::dynamic_pointer_cast<const core::ConstantExpr>(parseExpr(sql));
+    VELOX_CHECK_NOT_NULL(expr);
+
+    auto value =
+        INTERVAL_DAY_TIME()->valueToString(expr->value().value<int64_t>());
+    if (expr->alias()) {
+      return fmt::format("{} AS {}", value, expr->alias().value());
+    }
+
+    return value;
+  };
+
+  EXPECT_EQ("0 05:00:00.000", parseInterval("INTERVAL 5 HOURS"));
+  EXPECT_EQ("0 00:36:00.000", parseInterval("INTERVAL 36 MINUTES"));
+  EXPECT_EQ("0 00:00:07.000", parseInterval("INTERVAL 7 SECONDS"));
+  EXPECT_EQ("0 00:00:00.123", parseInterval("INTERVAL 123 MILLISECONDS"));
+
+  EXPECT_EQ("0 00:00:12.345", parseInterval("INTERVAL 12345 MILLISECONDS"));
+  EXPECT_EQ("0 03:25:45.678", parseInterval("INTERVAL 12345678 MILLISECONDS"));
+  EXPECT_EQ("1 03:48:20.100", parseInterval("INTERVAL 100100100 MILLISECONDS"));
 
   EXPECT_EQ(
-      "\"0 00:00:12.345\"",
-      parseExpr("INTERVAL 12345 MILLISECONDS")->toString());
-  EXPECT_EQ(
-      "\"0 03:25:45.678\"",
-      parseExpr("INTERVAL 12345678 MILLISECONDS")->toString());
-  EXPECT_EQ(
-      "\"1 03:48:20.100\"",
-      parseExpr("INTERVAL 100100100 MILLISECONDS")->toString());
-
-  EXPECT_EQ(
-      "\"0 00:00:00.011\" AS x",
-      parseExpr("INTERVAL 11 MILLISECONDS AS x")->toString());
+      "0 00:00:00.011 AS x", parseInterval("INTERVAL 11 MILLISECONDS AS x"));
 }
 
 TEST(DuckParserTest, cast) {
@@ -430,7 +440,8 @@ const std::string boundTypeString(BoundType b) {
 }
 
 const std::string parseWindow(const std::string& expr) {
-  auto windowExpr = parseWindowExpr(expr);
+  ParseOptions options;
+  auto windowExpr = parseWindowExpr(expr, options);
   std::string concatPartitions = "";
   int i = 0;
   for (const auto& partition : windowExpr.partitionBy) {
@@ -506,6 +517,36 @@ TEST(DuckParserTest, window) {
       parseWindow(
           "row_number() over (partition by a order by b desc nulls first "
           "rows between a + 10 preceding and 10 following)"));
+
+  EXPECT_EQ(
+      "lead(\"x\",\"y\",\"z\") OVER (  "
+      "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+      parseWindow("lead(x, y, z) over ()"));
+
+  EXPECT_EQ(
+      "lag(\"x\",3,\"z\") OVER (  "
+      "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+      parseWindow("lag(x, 3, z) over ()"));
+
+  EXPECT_EQ(
+      "nth_value(\"x\",3) OVER (  "
+      "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)",
+      parseWindow("nth_value(x, 3) over ()"));
+}
+
+TEST(DuckParserTest, windowWithIntegerConstant) {
+  ParseOptions options;
+  options.parseIntegerAsBigint = false;
+  auto windowExpr = parseWindowExpr("nth_value(x, 3) over ()", options);
+  auto func =
+      std::dynamic_pointer_cast<const core::CallExpr>(windowExpr.functionCall);
+  ASSERT_TRUE(func != nullptr)
+      << windowExpr.functionCall->toString() << " is not a call expr";
+  EXPECT_EQ(func->getInputs().size(), 2);
+  auto param = func->getInputs()[1];
+  auto constant = std::dynamic_pointer_cast<const core::ConstantExpr>(param);
+  ASSERT_TRUE(constant != nullptr) << param->toString() << " is not a constant";
+  EXPECT_EQ(*constant->type(), *INTEGER());
 }
 
 TEST(DuckParserTest, invalidExpression) {
@@ -521,6 +562,18 @@ TEST(DuckParserTest, parseDecimalConstant) {
   if (auto constant =
           std::dynamic_pointer_cast<const core::ConstantExpr>(expr)) {
     ASSERT_EQ(*constant->type(), *DECIMAL(4, 3));
+  } else {
+    FAIL() << expr->toString() << " is not a constant";
+  }
+}
+
+TEST(DuckParserTest, parseInteger) {
+  ParseOptions options;
+  options.parseIntegerAsBigint = false;
+  auto expr = parseExpr("1234", options);
+  if (auto constant =
+          std::dynamic_pointer_cast<const core::ConstantExpr>(expr)) {
+    ASSERT_EQ(*constant->type(), *INTEGER());
   } else {
     FAIL() << expr->toString() << " is not a constant";
   }

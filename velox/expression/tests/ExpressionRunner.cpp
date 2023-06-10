@@ -20,7 +20,6 @@
 #include "velox/common/memory/Memory.h"
 #include "velox/core/QueryCtx.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
-#include "velox/exec/tests/utils/QueryAssertions.h"
 #include "velox/expression/Expr.h"
 #include "velox/expression/tests/ExpressionRunner.h"
 #include "velox/expression/tests/ExpressionVerifier.h"
@@ -29,6 +28,7 @@
 #include "velox/parse/QueryPlanner.h"
 #include "velox/parse/TypeResolver.h"
 #include "velox/vector/VectorSaver.h"
+#include "velox/vector/fuzzer/VectorFuzzer.h"
 
 namespace facebook::velox::test {
 
@@ -113,11 +113,13 @@ void ExpressionRunner::run(
     const std::string& resultPath,
     const std::string& mode,
     vector_size_t numRows,
-    const std::string& storeResultPath) {
+    const std::string& storeResultPath,
+    const std::string& lazyColumnListPath,
+    bool findMinimalSubExpression) {
   VELOX_CHECK(!sql.empty());
 
   std::shared_ptr<core::QueryCtx> queryCtx{std::make_shared<core::QueryCtx>()};
-  std::shared_ptr<memory::MemoryPool> pool{memory::getDefaultMemoryPool()};
+  std::shared_ptr<memory::MemoryPool> pool{memory::addDefaultLeafMemoryPool()};
   core::ExecCtx execCtx{pool.get(), queryCtx.get()};
 
   RowVectorPtr inputVector;
@@ -132,6 +134,12 @@ void ExpressionRunner::run(
         "Input vector is not a RowVector: {}",
         inputVector->toString());
     VELOX_CHECK_GT(inputVector->size(), 0, "Input vector must not be empty.");
+  }
+
+  std::vector<int> columnsToWrapInLazy;
+  if (!lazyColumnListPath.empty()) {
+    columnsToWrapInLazy =
+        restoreStdVectorFromFile<int>(lazyColumnListPath.c_str());
   }
 
   parse::registerTypeResolver();
@@ -176,11 +184,33 @@ void ExpressionRunner::run(
   LOG(INFO) << "Evaluating SQL expression(s): " << sql;
 
   if (mode == "verify") {
-    VELOX_CHECK_EQ(
-        1, typedExprs.size(), "'verify' mode supports only one SQL expression");
-    test::ExpressionVerifier(&execCtx, {false, ""})
-        .verify(typedExprs[0], inputVector, std::move(resultVector), true);
+    auto verifier = test::ExpressionVerifier(&execCtx, {false, ""});
+    try {
+      verifier.verify(
+          typedExprs,
+          inputVector,
+          std::move(resultVector),
+          true,
+          columnsToWrapInLazy);
+    } catch (const std::exception& e) {
+      if (findMinimalSubExpression) {
+        VectorFuzzer::Options options;
+        VectorFuzzer fuzzer(options, pool.get());
+        computeMinimumSubExpression(
+            std::move(verifier),
+            fuzzer,
+            typedExprs,
+            inputVector,
+            columnsToWrapInLazy);
+      }
+      throw;
+    }
+
   } else if (mode == "common") {
+    if (!columnsToWrapInLazy.empty()) {
+      inputVector =
+          VectorFuzzer::fuzzRowChildrenToLazy(inputVector, columnsToWrapInLazy);
+    }
     exec::ExprSet exprSet(typedExprs, &execCtx);
     auto results = evaluateAndPrintResults(exprSet, inputVector, rows, execCtx);
     if (!storeResultPath.empty()) {

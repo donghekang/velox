@@ -29,6 +29,7 @@ namespace facebook::velox::duckdb {
 struct ParseOptions {
   // Retain legacy behavior by default.
   bool parseDecimalAsDouble = true;
+  bool parseIntegerAsBigint = true;
 };
 
 // Parses an input expression using DuckDB's internal postgresql-based parser,
@@ -85,6 +86,8 @@ struct IExprWindowFunction {
       orderBy;
 };
 
-const IExprWindowFunction parseWindowExpr(const std::string& windowString);
+const IExprWindowFunction parseWindowExpr(
+    const std::string& windowString,
+    const ParseOptions& options);
 
 } // namespace facebook::velox::duckdb
