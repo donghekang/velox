@@ -15,6 +15,7 @@
 #include "velox/core/PlanFragment.h"
 #include "velox/dwio/dwrf/reader/DwrfReader.h"
 #include "velox/dwio/parquet/RegisterParquetReader.h"
+#include "velox/dwio/parquet/RegisterParquetWriter.h"
 #include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/Task.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
@@ -71,6 +72,7 @@ void registerConnector() {
   filesystems::registerLocalFileSystem();
   dwrf::registerDwrfReaderFactory();
   parquet::registerParquetReaderFactory(::parquet::ParquetReaderType::NATIVE);
+  parquet::registerParquetWriterFactory();
 }
 
 void addSplits(
