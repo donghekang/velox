@@ -74,6 +74,8 @@ class Writer : public dwio::common::Writer {
   void close();
 
  private:
+  void forceWrite();
+
   const int32_t rowsInRowGroup_;
   const double bufferGrowRatio_;
 
@@ -88,6 +90,11 @@ class Writer : public dwio::common::Writer {
   std::shared_ptr<ArrowDataBufferSink> stream_;
 
   std::shared_ptr<ArrowContext> arrowContext_;
+
+  VectorPtr data_buf_;
+  vector_size_t data_buf_size_ = 0;
+  // number of rows in each group
+  const vector_size_t ROW_GROUP_SIZE = 4 * 1024 * 1024;
 };
 
 class ParquetWriterFactory : public dwio::common::WriterFactory {

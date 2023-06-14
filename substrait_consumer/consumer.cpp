@@ -71,6 +71,7 @@ void registerConnector() {
   connector::registerConnector(hiveConnector);
   filesystems::registerLocalFileSystem();
   dwrf::registerDwrfReaderFactory();
+  dwrf::registerDwrfWriterFactory();
   parquet::registerParquetReaderFactory(::parquet::ParquetReaderType::NATIVE);
   parquet::registerParquetWriterFactory();
 }
@@ -142,6 +143,12 @@ int main(int argc, char** argv) {
   std::shared_ptr<folly::Executor> executor(
       std::make_shared<folly::CPUThreadPoolExecutor>(thread_num));
   query_builder.queryCtx(std::make_shared<core::QueryCtx>(executor.get()));
+  // query_builder.config(
+  //     velox::core::QueryConfig::kPreferredOutputBatchRows,
+  //     std::to_string(100 * 1024));
+  // query_builder.config(
+  //     velox::core::QueryConfig::kPreferredOutputBatchBytes,
+  //     std::to_string(16 * 1024 * 1024));
   query_builder.maxDrivers(thread_num);
   printf("Number of threads: %d\n", thread_num);
 
