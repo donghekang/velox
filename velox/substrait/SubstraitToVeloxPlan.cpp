@@ -15,6 +15,7 @@
  */
 
 #include "velox/substrait/SubstraitToVeloxPlan.h"
+#include "velox/common/file/FileSystems.h"
 #include "velox/exec/HashPartitionFunction.h"
 #include "velox/exec/RoundRobinPartitionFunction.h"
 #include "velox/substrait/TypeUtils.h"
@@ -591,9 +592,18 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
     for (const auto& file : fileList) {
       // Expect all files to share the same index.
       splitInfo->partitionIndex = file.partition_index();
-      splitInfo->paths.emplace_back(file.uri_file());
       splitInfo->starts.emplace_back(file.start());
       splitInfo->lengths.emplace_back(file.length());
+      if (file.has_uri_file())
+        splitInfo->paths.emplace_back(file.uri_file());
+      else if (file.has_uri_folder()) {
+        auto folder_uri = file.uri_folder();
+        auto fs = velox::filesystems::getFileSystem(folder_uri, nullptr);
+        auto file_names = fs->list(folder_uri);
+        splitInfo->paths.insert(
+            splitInfo->paths.end(), file_names.begin(), file_names.end());
+      }
+
       switch (file.file_format_case()) {
         case SubstraitFileFormatCase::kOrc:
           splitInfo->format = dwio::common::FileFormat::DWRF;
