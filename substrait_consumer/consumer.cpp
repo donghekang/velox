@@ -88,7 +88,7 @@ void addSplits(
     const auto format = it->second->format;
     for (auto p : paths) {
       auto s = std::make_shared<connector::hive::HiveConnectorSplit>(
-          kHiveConnectorId, p, dwio::common::FileFormat::PARQUET);
+          kHiveConnectorId, p, format);
       task->addSplit(it->first, exec::Split{s});
     }
     task->noMoreSplits(it->first);

@@ -729,8 +729,21 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
       ::substrait::WriteRel::WriteTypeCase::kNamedTable,
       "Substrait WriteRel can only write to a NamedObject");
   std::string targetPath;
-  for (auto n : writeRel.named_table().names())
-    targetPath += "/" + n;
+  dwio::common::FileFormat out_format = dwio::common::FileFormat::PARQUET;
+  VELOX_CHECK_LE(writeRel.named_table().names_size(), 2);
+  VELOX_CHECK_GT(writeRel.named_table().names_size(), 0);
+  targetPath = writeRel.named_table().names(0);
+  if (writeRel.named_table().names_size() == 2) {
+    std::string f = writeRel.named_table().names(1);
+    for (char& c : f)
+      c = tolower(c);
+    VELOX_CHECK(f == "parquet" || f == "dwrf");
+    if (f == "parquet")
+      out_format = dwio::common::FileFormat::PARQUET;
+    else
+      out_format = dwio::common::FileFormat::DWRF;
+  }
+
   std::shared_ptr<connector::hive::LocationHandle> locationHandle;
   switch (writeRel.op()) {
     case ::substrait::WriteRel::WRITE_OP_CTAS:
@@ -770,7 +783,7 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
   auto insertTableHandel = std::make_shared<core::InsertTableHandle>(
       kHiveConnectorId,
       std::make_shared<connector::hive::HiveInsertTableHandle>(
-          columnHandles, locationHandle, dwio::common::FileFormat::PARQUET));
+          columnHandles, locationHandle, out_format));
 
   auto outputType = ROW({"rowCount"}, {BIGINT()});
   return std::make_shared<core::TableWriteNode>(
