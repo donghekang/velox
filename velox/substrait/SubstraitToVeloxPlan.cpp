@@ -152,24 +152,18 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
 
   // Parse measures and get the aggregate expressions.
   // Each measure represents one aggregate expression.
-  std::vector<core::CallTypedExprPtr> aggExprs;
-  aggExprs.reserve(aggRel.measures().size());
-  std::vector<core::FieldAccessTypedExprPtr> aggregateMasks;
-  aggregateMasks.reserve(aggRel.measures().size());
+  std::vector<core::AggregationNode::Aggregate> aggregates;
+  aggregates.reserve(aggRel.measures().size());
 
   for (const auto& measure : aggRel.measures()) {
-    core::FieldAccessTypedExprPtr aggregateMask;
+    core::FieldAccessTypedExprPtr mask;
     ::substrait::Expression substraitAggMask = measure.filter();
     // Get Aggregation Masks.
     if (measure.has_filter()) {
-      if (substraitAggMask.ByteSizeLong() == 0) {
-        aggregateMask = {};
-      } else {
-        aggregateMask =
-            std::dynamic_pointer_cast<const core::FieldAccessTypedExpr>(
-                exprConverter_->toVeloxExpr(substraitAggMask, inputType));
+      if (substraitAggMask.ByteSizeLong() > 0) {
+        mask = std::dynamic_pointer_cast<const core::FieldAccessTypedExpr>(
+            exprConverter_->toVeloxExpr(substraitAggMask, inputType));
       }
-      aggregateMasks.push_back(aggregateMask);
     }
 
     const auto& aggFunction = measure.measure();
@@ -185,7 +179,8 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
         substraitParser_->parseType(aggFunction.output_type())->type);
     auto aggExpr = std::make_shared<const core::CallTypedExpr>(
         aggVeloxType, std::move(aggParams), funcName);
-    aggExprs.emplace_back(aggExpr);
+    aggregates.emplace_back(
+        core::AggregationNode::Aggregate{aggExpr, mask, {}, {}});
   }
 
   bool ignoreNullKeys = false;
@@ -206,8 +201,7 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
       veloxGroupingExprs,
       preGroupingExprs,
       aggOutNames,
-      aggExprs,
-      aggregateMasks,
+      aggregates,
       ignoreNullKeys,
       childNode);
 
@@ -629,6 +623,7 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
         "hive_table",
         filterPushdownEnabled,
         connector::hive::SubfieldFilters{},
+        nullptr,
         nullptr);
   } else {
     connector::hive::SubfieldFilters filters =
@@ -638,6 +633,7 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
         "hive_table",
         filterPushdownEnabled,
         std::move(filters),
+        nullptr,
         nullptr);
   }
 
@@ -651,6 +647,7 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
     assignments[outName] = std::make_shared<connector::hive::HiveColumnHandle>(
         colNameList[idx],
         connector::hive::HiveColumnHandle::ColumnType::kRegular,
+        veloxTypeList[idx],
         veloxTypeList[idx]);
     outNames.emplace_back(outName);
   }
@@ -787,6 +784,7 @@ core::PlanNodePtr SubstraitVeloxPlanConverter::toVeloxPlan(
     columnHandles.push_back(std::make_shared<connector::hive::HiveColumnHandle>(
         writeColumnNames[i],
         connector::hive::HiveColumnHandle::ColumnType::kRegular,
+        inputType->childAt(i),
         inputType->childAt(i)));
 
   static const std::string kHiveConnectorId = "test-hive";

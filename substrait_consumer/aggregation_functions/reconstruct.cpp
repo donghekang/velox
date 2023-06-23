@@ -18,7 +18,7 @@ struct InitTrait {
 template <>
 struct InitTrait<Timestamp> {
   static constexpr Timestamp initValue() {
-    return Timestamp(0, 0);
+    return Timestamp();
   }
 };
 

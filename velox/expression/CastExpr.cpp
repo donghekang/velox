@@ -27,6 +27,7 @@
 #include "velox/expression/StringWriter.h"
 #include "velox/external/date/tz.h"
 #include "velox/functions/lib/RowsTranslationUtil.h"
+#include "velox/type/Type.h"
 #include "velox/vector/ComplexVector.h"
 #include "velox/vector/FunctionVector.h"
 #include "velox/vector/SelectivityVector.h"
@@ -41,18 +42,24 @@ namespace {
 /// @param row The index of the current row
 /// @param input The input vector (of type FromKind)
 /// @param result The output vector (of type ToKind)
-/// @return False if the result is null
 template <TypeKind ToKind, TypeKind FromKind, bool Truncate>
 void applyCastKernel(
     vector_size_t row,
     const SimpleVector<typename TypeTraits<FromKind>::NativeType>* input,
-    FlatVector<typename TypeTraits<ToKind>::NativeType>* result,
-    bool& nullOutput) {
-  auto output = util::Converter<ToKind, void, Truncate>::cast(
-      input->valueAt(row), nullOutput);
-  if (nullOutput) {
+    FlatVector<typename TypeTraits<ToKind>::NativeType>* result) {
+  if (input->type()->isDecimal()) {
+    // Special handling for decimal types.
+    auto [precision, scale] = getDecimalPrecisionScale(*input->type());
+    if constexpr (ToKind == TypeKind::DOUBLE) {
+      auto output =
+          util::Converter<CppToType<double>::typeKind, void, Truncate>::cast(
+              input->valueAt(row));
+      result->set(row, output / (double)DecimalUtil::kPowersOfTen[scale]);
+    }
     return;
   }
+  auto output =
+      util::Converter<ToKind, void, Truncate>::cast(input->valueAt(row));
 
   if constexpr (ToKind == TypeKind::VARCHAR || ToKind == TypeKind::VARBINARY) {
     // Write the result output to the output vector
@@ -142,11 +149,10 @@ void applyCastPrimitives(
 
   if (!queryConfig.isCastToIntByTruncate()) {
     context.applyToSelectedNoThrow(rows, [&](int row) {
-      bool nullOutput = false;
       try {
         // Passing a false truncate flag
         applyCastKernel<ToKind, FromKind, false>(
-            row, inputSimpleVector, resultFlatVector, nullOutput);
+            row, inputSimpleVector, resultFlatVector);
       } catch (const VeloxRuntimeError& re) {
         VELOX_FAIL(
             makeErrorMessage(input, row, resultFlatVector->type()) + " " +
@@ -159,19 +165,14 @@ void applyCastPrimitives(
         VELOX_USER_FAIL(
             makeErrorMessage(input, row, resultFlatVector->type()) + " " +
             e.what());
-      }
-
-      if (nullOutput) {
-        VELOX_USER_FAIL(makeErrorMessage(input, row, resultFlatVector->type()));
       }
     });
   } else {
     context.applyToSelectedNoThrow(rows, [&](int row) {
-      bool nullOutput = false;
       try {
         // Passing a true truncate flag
         applyCastKernel<ToKind, FromKind, true>(
-            row, inputSimpleVector, resultFlatVector, nullOutput);
+            row, inputSimpleVector, resultFlatVector);
       } catch (const VeloxRuntimeError& re) {
         VELOX_FAIL(
             makeErrorMessage(input, row, resultFlatVector->type()) + " " +
@@ -184,10 +185,6 @@ void applyCastPrimitives(
         VELOX_USER_FAIL(
             makeErrorMessage(input, row, resultFlatVector->type()) + " " +
             e.what());
-      }
-
-      if (nullOutput) {
-        VELOX_USER_FAIL(makeErrorMessage(input, row, resultFlatVector->type()));
       }
     });
   }

@@ -14,6 +14,7 @@
 #include "velox/connectors/hive/HiveConnectorSplit.h"
 #include "velox/core/PlanFragment.h"
 #include "velox/dwio/dwrf/reader/DwrfReader.h"
+#include "velox/dwio/dwrf/writer/Writer.h"
 #include "velox/dwio/parquet/RegisterParquetReader.h"
 #include "velox/dwio/parquet/RegisterParquetWriter.h"
 #include "velox/exec/PlanNodeStats.h"

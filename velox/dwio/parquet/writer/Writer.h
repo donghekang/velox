@@ -58,12 +58,14 @@ class Writer : public dwio::common::Writer {
       std::unique_ptr<dwio::common::DataSink> sink,
       const WriterOptions& options);
 
-  static bool isArrowCodecAvailable(dwio::common::CompressionKind compression);
+  ~Writer() override = default;
+
+  static bool isCodecAvailable(dwio::common::CompressionKind compression);
 
   // Appends 'data' into the writer.
   void write(const VectorPtr& data) override;
 
-  void flush();
+  void flush() override;
 
   // Forces a row group boundary before the data added by next write().
   void newRowGroup(int32_t numRows);
@@ -71,20 +73,16 @@ class Writer : public dwio::common::Writer {
   // Closes 'this', After close, data can no longer be added and the completed
   // Parquet file is flushed into 'sink' provided at construction. 'sink' stays
   // live until destruction of 'this'.
-  void close();
+  void close() override;
 
  private:
   void forceWrite();
 
   const int32_t rowsInRowGroup_;
-  const double bufferGrowRatio_;
 
   // Pool for 'stream_'.
   std::shared_ptr<memory::MemoryPool> pool_;
   std::shared_ptr<memory::MemoryPool> generalPool_;
-
-  // Final destination of output.
-  std::unique_ptr<dwio::common::DataSink> finalSink_;
 
   // Temporary Arrow stream for capturing the output.
   std::shared_ptr<ArrowDataBufferSink> stream_;
@@ -93,8 +91,8 @@ class Writer : public dwio::common::Writer {
 
   VectorPtr data_buf_;
   vector_size_t data_buf_size_ = 0;
-  // number of rows in each group
-  const vector_size_t ROW_GROUP_SIZE = 4 * 1024 * 1024;
+  int64_t acc_in_size_ = 0;
+  int64_t acc_written_size_ = 0;
 };
 
 class ParquetWriterFactory : public dwio::common::WriterFactory {

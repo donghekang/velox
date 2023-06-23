@@ -95,7 +95,7 @@ General Aggregate Functions
 
     Returns an array created from the distinct input ``x`` elements.
 
-    Supported types of ``x`` are: TINYINT, SMALLINT, INTEGER, BIGINT.
+    Supported types of ``x`` are: TINYINT, SMALLINT, INTEGER, BIGINT, VARCHAR.
 
 .. function:: set_union(array(T)) -> array(T)
 
@@ -112,7 +112,7 @@ General Aggregate Functions
 
     Returns ARRAY[1, 2, 3, 4]
 
-    Supported types are: TINYINT, SMALLINT, INTEGER, BIGINT.
+    Supported types are: TINYINT, SMALLINT, INTEGER, BIGINT, VARCHAR.
 
 .. function:: sum(x) -> [same as input]
 
@@ -272,6 +272,17 @@ Statistical Aggregate Functions
 
     Returns the sample covariance of input values.
 
+.. function:: kurtosis(x) -> double
+
+    Returns the excess kurtosis of all input values. Unbiased estimate using
+    the following expression:
+
+    .. math::
+
+        \mathrm{kurtosis}(x) = {n(n+1) \over (n-1)(n-2)(n-3)} { \sum[(x_i-\mu)^4] \over \sigma^4} -3{ (n-1)^2 \over (n-2)(n-3) },
+
+   where :math:`\mu` is the mean, and :math:`\sigma` is the standard deviation.
+
 .. function:: regr_intercept(y, x) -> double
 
     Returns linear regression intercept of input values. ``y`` is the dependent
@@ -281,6 +292,10 @@ Statistical Aggregate Functions
 
     Returns linear regression slope of input values. ``y`` is the dependent
     value. ``x`` is the independent value.
+
+.. function:: skewness(x) -> double
+
+    Returns the skewness of all input values.
 
 .. function:: stddev(x) -> double
 

@@ -12,12 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-add_library(velox_experimental_exec_off_process OBJECT
-            OffProcessExpressionEval.cpp)
-
-target_link_libraries(velox_experimental_exec_off_process velox_core velox_exec
-                      velox_vector)
-
-if(${VELOX_BUILD_TESTING})
-  add_subdirectory(tests)
-endif()
+add_subdirectory(fbhive)

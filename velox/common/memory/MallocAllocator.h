@@ -41,6 +41,10 @@ class MallocAllocator : public MemoryAllocator {
     return kind_;
   }
 
+  size_t capacity() const override {
+    return capacity_;
+  }
+
   bool allocateNonContiguous(
       MachinePageCount numPages,
       Allocation& out,
@@ -54,7 +58,6 @@ class MallocAllocator : public MemoryAllocator {
       Allocation* collateral,
       ContiguousAllocation& allocation,
       ReservationCallback reservationCB = nullptr) override {
-    VELOX_CHECK_GT(numPages, 0);
     bool result;
     stats_.recordAllocate(AllocationTraits::pageBytes(numPages), 1, [&]() {
       result = allocateContiguousImpl(
