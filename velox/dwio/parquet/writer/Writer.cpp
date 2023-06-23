@@ -204,7 +204,8 @@ void Writer::forceWrite() {
         arrowProperties,
         &arrowContext_->writer));
   }
-  PARQUET_THROW_NOT_OK(arrowContext_->writer->WriteTable(*table, 10000));
+  PARQUET_THROW_NOT_OK(
+      arrowContext_->writer->WriteTable(*table, table->num_rows()));
   // clear the data_buf_
   data_buf_.reset();
   data_buf_size_ = 0;
